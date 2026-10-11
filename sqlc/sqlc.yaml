@@ -1,0 +1,124 @@
+# sqlc generates one Go package per module, next to the module that owns the
+# queries, so a module can never reach another module's queries. Add an entry
+# when a module gets its first query file, reusing the shared Go options:
+#
+#   - engine: postgresql
+#     schema: ../migrations
+#     queries: queries/menu.sql
+#     gen:
+#       go:
+#         <<: *go
+#         out: ../internal/menu/store
+#
+# Run with `make generate`. Generated packages are never edited by hand.
+version: "2"
+
+overrides:
+  go:
+    overrides:
+      # pgx/v5 reads timestamptz as pgtype.Timestamptz by default, which only
+      # adds something for infinite timestamps; the schema never stores those.
+      - db_type: timestamptz
+        go_type: time.Time
+      - db_type: timestamptz
+        nullable: true
+        go_type:
+          type: time.Time
+          pointer: true
+
+sql:
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/outbox.sql
+    gen:
+      go: &go
+        package: store
+        out: ../internal/platform/outbox/store
+        sql_package: pgx/v5
+        # Nullable columns as *string, *time.Time, … instead of pgtype wrappers.
+        emit_pointers_for_null_types: true
+        # Go names: ip → IP and before_json → BeforeJSON, not Ip and BeforeJson.
+        initialisms: [id, ip, json, url]
+        # Only the tables this package's queries use, not every table in the
+        # schema: a module's store never holds another module's row types.
+        omit_unused_structs: true
+
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/auth.sql
+    gen:
+      go:
+        <<: *go
+        out: ../internal/auth/store
+
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/user.sql
+    gen:
+      go:
+        <<: *go
+        out: ../internal/user/store
+
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/outlet.sql
+    gen:
+      go:
+        <<: *go
+        out: ../internal/outlet/store
+
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/audit.sql
+    gen:
+      go:
+        <<: *go
+        out: ../internal/audit/store
+
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/menu.sql
+    gen:
+      go:
+        <<: *go
+        out: ../internal/menu/store
+
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/device.sql
+    gen:
+      go:
+        <<: *go
+        out: ../internal/device/store
+
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/payment.sql
+    gen:
+      go:
+        <<: *go
+        out: ../internal/payment/store
+
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/order.sql
+    gen:
+      go:
+        <<: *go
+        out: ../internal/order/store
+
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/voucher.sql
+    gen:
+      go:
+        <<: *go
+        out: ../internal/voucher/store
+
+  - engine: postgresql
+    schema: ../migrations
+    queries: queries/table.sql
+    gen:
+      go:
+        <<: *go
+        out: ../internal/table/store

@@ -1,0 +1,5409 @@
+openapi: 3.1.0
+info:
+  title: Maki API
+  version: 0.2.0
+  description: |
+    Contract for the Maki POS backend. This file is the single source of truth:
+    maki-fe and maki-mobile generate their API types from it, so update it in
+    the same commit as the handler change.
+
+    Business endpoints live under `/api/v1`. Errors always use the
+    `ErrorEnvelope` schema; clients switch on `error.code`, never on `message`.
+
+    `error.message` is written in the language of the `Accept-Language`
+    request header — Indonesian (`id`, the default) or English (`en`) — and
+    the response's `Content-Language` header names the one used. Clients show
+    their own translation of `code` when they have one, and fall back to
+    `message`.
+
+    **Signing in.** `POST /api/v1/auth/login` returns a 15-minute access token,
+    sent as `Authorization: Bearer <token>`, and a refresh token that lasts 30
+    days from its last use. The web app gets the refresh token as an
+    `HttpOnly` cookie that page scripts can't read; the Android app gets it in
+    the response body and keeps it in secure storage. Each refresh replaces
+    the refresh token; presenting one that was already replaced signs that
+    session out everywhere.
+
+    **Access.** Every signed-in user has a set of `permissions` (see
+    `GET /api/v1/me`). An endpoint under `/api/v1/outlets/{oid}/` first checks
+    that the user may act in that outlet — the Owner in any outlet, everyone
+    else only in their own — and answers 404 `outlet_not_found` otherwise,
+    the same as for an outlet that doesn't exist. It then checks the
+    permission the endpoint names, 403 `forbidden` without it. Endpoints for
+    the Owner alone answer 403 `forbidden` to anyone else.
+
+    **Lists** take `?page=` (from 1) and `?page_size=` (1–100, 20 by default)
+    and answer `{"data": [...], "meta": {"page", "page_size", "total"}}`.
+
+    **Rate limits.** Sign-in, password reset and email verification answer
+    429 `rate_limited` when hit too often, per IP address and per account,
+    with a `Retry-After` header and `details.retry_after` in seconds.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: health
+    description: Liveness and readiness probes (public, outside /api/v1)
+  - name: auth
+    description: Signing in and out, sessions, password reset, email verification
+  - name: me
+    description: The signed-in user's own account
+  - name: outlet
+    description: The business's outlets, for the Owner alone
+  - name: role
+    description: An outlet's custom roles and the permissions they hold
+  - name: user
+    description: |
+      An outlet's Manager and staff accounts. The Owner manages Manager
+      accounts and promotes staff; Managers, and staff with `user.manage`,
+      manage staff. Nobody manages their own account here, and nobody
+      manages a user who holds a permission they lack, or gives a role that
+      holds one.
+  - name: menu
+    description: |
+      An outlet's menu: its categories, its menus and their stock. `menu.view`
+      reads it, `menu.manage` changes categories and menus, `stock.adjust`
+      counts stock. The Owner reads every outlet's menu and changes none.
+  - name: device
+    description: |
+      An outlet's cashier devices. The outlet's Manager activates one on the
+      device itself; from then on it proves itself with a token only it
+      holds (`maki_device` cookie in a browser, `X-Device-Token` from the
+      app). The Manager and the Owner list and revoke them.
+  - name: order
+    description: |
+      The cashier: its catalog, the orders it takes, and voids. Selling
+      needs `checkout.create` and one of the outlet's devices in use; the
+      orders are for whoever sells (`checkout.create`) or voids
+      (`order.void`). The Owner runs no till.
+
+      An online sale is charged with the figures on the cashier's screen,
+      so the server takes it only while they are still right, and otherwise
+      answers 409 naming what changed (`prices_changed`,
+      `menu_unavailable`, `order_stock_insufficient`, `total_changed`): the
+      cashier reloads the catalog and shows the new figures before charging
+      again.
+
+      A sale may name a voucher (`voucher_code`), which it takes a use of;
+      a void gives the use back. A dine-in sale may name its table
+      (`table_id`), which it seats its customers at.
+  - name: voucher
+    description: |
+      The Owner's discount vouchers: a percentage or an amount off an
+      order's subtotal, for every outlet or some, a number of uses in every
+      outlet together, and a period. The Owner manages them; an outlet's
+      Manager lists the ones its cashier can take; the cashier checks a
+      code before charging (`checkout.create`). Times are absolute; the
+      admin shows them in WIB.
+  - name: table
+    description: |
+      An outlet's dining areas, their tables and layouts, and the schedules
+      that take tables out of service. `table.view` reads them, which the
+      Owner does too; `table.manage` changes them. The cashier
+      (`checkout.create`) reads the floor and releases a table its
+      customers have left.
+
+      Each area has a canvas of 48 × 32 grid cells; a table, and a
+      decoration (a wall, the cashier, a door), is a box on it. A table's
+      status is worked out when it is read, in this order: `occupied`
+      while customers are seated (a dine-in sale there since it was last
+      released and since the outlet last opened or closed: an outlet
+      without hours, since midnight in its zone), `inactive`, `scheduled`
+      (a schedule under way has it out of service), or `available`. The
+      cashier seats an order at an available or an occupied table.
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      tags: [health]
+      summary: Liveness probe
+      description: Reports that the process is up. Never touches dependencies.
+      responses:
+        "200":
+          description: The process is up.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+  /readyz:
+    get:
+      operationId: getReadyz
+      tags: [health]
+      summary: Readiness probe
+      description: Reports whether the database answers within two seconds.
+      responses:
+        "200":
+          description: The service is ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "503":
+          description: The database is unavailable (`not_ready`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Sign in with username and password
+      description: |
+        Starts a session. With `client: web` the refresh token comes as the
+        `maki_refresh` cookie (HttpOnly, SameSite=Strict, path
+        `/api/v1/auth`); with `client: mobile` it comes in the body.
+
+        A user whose password was set by someone else can sign in, but has
+        `must_change_password: true` and gets 403 `password_change_required`
+        from every endpoint except `GET /me` and `PUT /me/password` until
+        they change it.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Signed in.
+          headers:
+            Set-Cookie:
+              description: "`maki_refresh` for `client: web`."
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          description: Wrong username or password (`invalid_credentials`). The same for an unknown username.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: The password is right but the account is deactivated (`account_disabled`), or its outlet is deactivated or deleted (`outlet_inactive`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/auth/refresh:
+    post:
+      operationId: refreshSession
+      tags: [auth]
+      summary: Exchange the refresh token for a new access token
+      description: |
+        The web app sends no body: the browser sends the `maki_refresh`
+        cookie, and the new refresh token comes back as the cookie. The
+        Android app sends `refresh_token` and gets the new one in the body.
+        Either way the old refresh token stops working.
+      security:
+        - refreshCookie: []
+        - {}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: A new access token, a new refresh token, and the user.
+          headers:
+            Set-Cookie:
+              description: The new `maki_refresh`, when the old one came as a cookie.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          description: |
+            The refresh token is missing, unknown, expired or revoked, or was
+            already replaced (`unauthorized`). Sign the user out.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: |
+            Another request refreshed this session a moment ago
+            (`refresh_superseded`), e.g. from a second browser tab. Retry once:
+            the browser already holds the new cookie.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Sign out of this session
+      description: |
+        Ends the session named by the refresh token (the cookie, or
+        `refresh_token` in the body) or else by the access token, and clears
+        the cookie. Always succeeds, so it is safe to call twice.
+      security:
+        - refreshCookie: []
+        - accessToken: []
+        - {}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "204":
+          description: Signed out.
+
+  /api/v1/auth/password/forgot:
+    post:
+      operationId: forgotPassword
+      tags: [auth]
+      summary: Ask for a password reset link
+      description: |
+        Only the Owner resets their own password this way; Managers and staff
+        are reset by the Owner or their Manager. If `login` is the Owner's
+        username or verified email, a link valid for 30 minutes is emailed.
+        The answer is the same whether or not that happened, so it reveals
+        nothing about which accounts exist.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgotPasswordRequest"
+      responses:
+        "202":
+          description: Accepted. A link is on its way if the account can reset by email.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/auth/password/reset:
+    post:
+      operationId: resetPassword
+      tags: [auth]
+      summary: Choose a new password with the emailed link's token
+      description: |
+        The token comes from the link's URL fragment (`#token=…`). On success
+        every session of the account is signed out and a notice is emailed.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordRequest"
+      responses:
+        "204":
+          description: The password is changed. Sign in with it.
+        "400":
+          description: |
+            The request is malformed (`invalid_request`), or the token is
+            unknown, used or expired (`token_invalid`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          $ref: "#/components/responses/PasswordRejected"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/auth/email/verify:
+    post:
+      operationId: verifyEmail
+      tags: [auth]
+      summary: Confirm an email address with the emailed link's token
+      description: |
+        The token comes from the link's URL fragment (`#token=…`). The new
+        address replaces the old one only now.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRequest"
+      responses:
+        "204":
+          description: The address is confirmed.
+        "400":
+          description: |
+            The request is malformed (`invalid_request`), or the token is
+            unknown, used or expired (`token_invalid`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/me:
+    get:
+      operationId: getMe
+      tags: [me]
+      summary: The signed-in user
+      description: Open even while the password must be changed.
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    patch:
+      operationId: updateMe
+      tags: [me]
+      summary: Change the signed-in user's own settings
+      description: |
+        `locale` sets the user's language on every device; `null` follows the
+        outlet's language.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateMeRequest"
+      responses:
+        "200":
+          description: The updated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/PasswordChangeRequired"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /api/v1/me/password:
+    put:
+      operationId: changePassword
+      tags: [me]
+      summary: Change the signed-in user's password
+      description: |
+        Needs the current password. Every other session of the account is
+        signed out; this one stays. Clears `must_change_password`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "204":
+          description: Changed.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/PasswordRejected"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/me/email:
+    put:
+      operationId: changeEmail
+      tags: [me]
+      summary: Start changing the signed-in user's email address
+      description: |
+        Needs the current password. Emails a confirmation link (valid 24
+        hours) to the new address and a notice to the current one. The
+        current address stays in use until the new one is confirmed with
+        `POST /api/v1/auth/email/verify`; `Me.pending_email` shows it until
+        then.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeEmailRequest"
+      responses:
+        "202":
+          description: The confirmation link is on its way.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/PasswordChangeRequired"
+        "422":
+          description: |
+            A field is invalid (`validation_failed`), the current password is
+            wrong (`wrong_password`), or the address is already the account's
+            (`email_unchanged`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/outlets:
+    get:
+      operationId: listOutlets
+      tags: [outlet]
+      summary: List the outlets
+      description: The Owner only. Sorted by name; deleted outlets never show.
+      parameters:
+        - name: q
+          in: query
+          description: Part of the name or the code, in any case.
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, inactive]
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of outlets.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutletList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createOutlet
+      tags: [outlet]
+      summary: Create an outlet
+      description: |
+        The Owner only. The outlet starts active, with a cashier role
+        (`checkout.create`) named in its language for its Manager to start
+        from.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OutletInput"
+      responses:
+        "201":
+          description: The new outlet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Outlet"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/OutletCodeTaken"
+        "422":
+          $ref: "#/components/responses/OutletRejected"
+
+  /api/v1/outlets/{oid}:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: getOutlet
+      tags: [outlet]
+      summary: One outlet
+      description: The Owner only.
+      responses:
+        "200":
+          description: The outlet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Outlet"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+    put:
+      operationId: updateOutlet
+      tags: [outlet]
+      summary: Change an outlet
+      description: The Owner only. Every field but the status.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OutletInput"
+      responses:
+        "200":
+          description: The changed outlet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Outlet"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          $ref: "#/components/responses/OutletCodeTaken"
+        "422":
+          $ref: "#/components/responses/OutletRejected"
+    delete:
+      operationId: deleteOutlet
+      tags: [outlet]
+      summary: Delete a deactivated outlet
+      description: |
+        The Owner only. `confirm_name` must repeat the outlet's name. The
+        outlet disappears from every list; its data stays, and its code is
+        never used again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteOutletRequest"
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          description: The outlet is still active (`outlet_active`); deactivate it first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          description: |
+            `confirm_name` isn't the outlet's name (`outlet_name_mismatch`),
+            or is missing (`validation_failed`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/outlets/{oid}/status:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    patch:
+      operationId: setOutletStatus
+      tags: [outlet]
+      summary: Activate or deactivate an outlet
+      description: |
+        The Owner only. While an outlet is inactive its users can't sign in,
+        and their sessions end at their next request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OutletStatusRequest"
+      responses:
+        "200":
+          description: The outlet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Outlet"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /api/v1/permissions:
+    get:
+      operationId: listPermissions
+      tags: [role]
+      summary: Every permission, grouped by module
+      description: The catalog a role's checklist shows. Any signed-in user.
+      responses:
+        "200":
+          description: The catalog.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionCatalog"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/outlets/{oid}/roles:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listRoles
+      tags: [role]
+      summary: The outlet's roles
+      description: |
+        Needs `role.view`, or `user.view`: whoever sees the outlet's users
+        filters them by role, and gives one when managing them. Sorted by
+        name.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of roles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createRole
+      tags: [role]
+      summary: Create a role
+      description: |
+        Needs `role.manage`. The role may only hold permissions the caller
+        holds themselves.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleInput"
+      responses:
+        "201":
+          description: The new role.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleDetail"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RoleForbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          $ref: "#/components/responses/RoleNameTaken"
+        "422":
+          $ref: "#/components/responses/RoleRejected"
+
+  /api/v1/outlets/{oid}/roles/{rid}:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/RoleID"
+    get:
+      operationId: getRole
+      tags: [role]
+      summary: One role, with the users who hold it
+      description: Needs `role.view`.
+      responses:
+        "200":
+          description: The role.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/RoleNotFound"
+    put:
+      operationId: updateRole
+      tags: [role]
+      summary: Change a role
+      description: |
+        Needs `role.manage`. Permissions the change adds must be the
+        caller's own; it may keep or drop ones the caller lacks. The role's
+        users get the new permissions from their next request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleInput"
+      responses:
+        "200":
+          description: The changed role.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleDetail"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RoleForbidden"
+        "404":
+          $ref: "#/components/responses/RoleNotFound"
+        "409":
+          $ref: "#/components/responses/RoleNameTaken"
+        "422":
+          $ref: "#/components/responses/RoleRejected"
+    delete:
+      operationId: deleteRole
+      tags: [role]
+      summary: Delete a role nobody holds
+      description: Needs `role.manage`.
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/RoleNotFound"
+        "409":
+          description: |
+            Users still hold the role (`role_in_use`); `details.users` lists
+            them as `{user_id, name}` so they can be moved first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/outlets/{oid}/users:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listStaff
+      tags: [user]
+      summary: The outlet's users
+      description: Needs `user.view`. Sorted by name; deleted users never show.
+      parameters:
+        - name: q
+          in: query
+          description: Part of the name or the username, in any case.
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, inactive]
+        - name: role_id
+          in: query
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of users.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaffList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createStaff
+      tags: [user]
+      summary: Create a Manager or staff account
+      description: |
+        Needs `user.manage`. A Manager account (`is_manager`) is the Owner's
+        to create; a staff account, with its `role_id`, everyone else's. The
+        password is temporary: the user changes it at the first sign-in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStaffRequest"
+      responses:
+        "201":
+          description: The new account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Staff"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/StaffForbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          description: |
+            Someone has this username, or had it before they were deleted
+            (`username_taken`): a username is never used again.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          $ref: "#/components/responses/StaffRejected"
+
+  /api/v1/outlets/{oid}/users/{uid}:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/UserID"
+    get:
+      operationId: getStaff
+      tags: [user]
+      summary: One of the outlet's users
+      description: Needs `user.view`.
+      responses:
+        "200":
+          description: The account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Staff"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/UserNotFound"
+    put:
+      operationId: updateStaff
+      tags: [user]
+      summary: Change an account
+      description: |
+        Needs `user.manage`. Changes the name, email and phone, and the role
+        or rank. The Owner promotes a staff member with `is_manager: true`,
+        and makes a Manager staff again with `is_manager: false` and a
+        `role_id`; either ends the user's sessions. An email changed here
+        isn't verified.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateStaffRequest"
+      responses:
+        "200":
+          description: The changed account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Staff"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/StaffForbidden"
+        "404":
+          $ref: "#/components/responses/UserNotFound"
+        "422":
+          $ref: "#/components/responses/StaffRejected"
+    delete:
+      operationId: deleteStaff
+      tags: [user]
+      summary: Delete an account
+      description: |
+        Needs `user.manage`. Its sessions end; its username stays taken, and
+        its data stays in the name it had.
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/StaffForbidden"
+        "404":
+          $ref: "#/components/responses/UserNotFound"
+
+  /api/v1/outlets/{oid}/users/{uid}/status:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/UserID"
+    patch:
+      operationId: setStaffStatus
+      tags: [user]
+      summary: Activate or deactivate an account
+      description: Needs `user.manage`. Deactivating ends the user's sessions at once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StaffStatusRequest"
+      responses:
+        "200":
+          description: The account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Staff"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/StaffForbidden"
+        "404":
+          $ref: "#/components/responses/UserNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /api/v1/outlets/{oid}/users/{uid}/reset-password:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/UserID"
+    post:
+      operationId: resetStaffPassword
+      tags: [user]
+      summary: Give an account a temporary password
+      description: |
+        Needs `user.manage`. The user must change it at their next sign-in;
+        their sessions end at once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetStaffPasswordRequest"
+      responses:
+        "204":
+          description: Reset.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/StaffForbidden"
+        "404":
+          $ref: "#/components/responses/UserNotFound"
+        "422":
+          description: |
+            `password` is missing (`validation_failed`) or breaks a rule:
+            `password_too_short` (`details.min`), `password_too_long`
+            (`details.max`), `password_same_as_username`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/outlets/{oid}/categories:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listCategories
+      tags: [menu]
+      summary: The outlet's menu categories
+      description: |
+        Needs `menu.view`. In the order the cashier shows them (`sort_order`,
+        then the name); deleted categories never show.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of categories.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createCategory
+      tags: [menu]
+      summary: Create a category
+      description: Needs `menu.manage`. It goes last in the order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoryInput"
+      responses:
+        "201":
+          description: The new category.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Category"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          $ref: "#/components/responses/CategoryNameTaken"
+        "422":
+          $ref: "#/components/responses/CategoryRejected"
+
+  /api/v1/outlets/{oid}/categories/order:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    put:
+      operationId: reorderCategories
+      tags: [menu]
+      summary: Put the categories in a new order
+      description: |
+        Needs `menu.manage`. `category_ids` lists every category of the outlet,
+        each once, in the new order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoryOrderRequest"
+      responses:
+        "204":
+          description: In the new order.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          description: |
+            The list isn't the outlet's categories as they are now, each once
+            (`categories_changed`): one was added or deleted since it was read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/outlets/{oid}/categories/{cid}:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/CategoryID"
+    get:
+      operationId: getCategory
+      tags: [menu]
+      summary: One category
+      description: Needs `menu.view`.
+      responses:
+        "200":
+          description: The category.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Category"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/CategoryNotFound"
+    put:
+      operationId: updateCategory
+      tags: [menu]
+      summary: Change a category's name and icon
+      description: Needs `menu.manage`. A field left out is cleared (the icon).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoryInput"
+      responses:
+        "200":
+          description: The changed category.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Category"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/CategoryNotFound"
+        "409":
+          $ref: "#/components/responses/CategoryNameTaken"
+        "422":
+          $ref: "#/components/responses/CategoryRejected"
+    delete:
+      operationId: deleteCategory
+      tags: [menu]
+      summary: Delete a category
+      description: |
+        Needs `menu.manage`. Only a category that holds no menu, deleted menus
+        aside; its name is free again afterwards.
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/CategoryNotFound"
+        "409":
+          description: |
+            The category still holds menus (`category_in_use`); `details.menus`
+            counts them.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/outlets/{oid}/categories/{cid}/status:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/CategoryID"
+    patch:
+      operationId: setCategoryStatus
+      tags: [menu]
+      summary: Show or hide a category at the cashier
+      description: |
+        Needs `menu.manage`. An inactive category, and every menu in it, is
+        hidden at the cashier; they stay in the admin area.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActiveRequest"
+      responses:
+        "200":
+          description: The category.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Category"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/CategoryNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /api/v1/outlets/{oid}/menus:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listMenus
+      tags: [menu]
+      summary: The outlet's menus
+      description: |
+        Needs `menu.view`. In the cashier's order: by the categories' order,
+        then by name. Deleted menus never show.
+      parameters:
+        - name: q
+          in: query
+          description: Part of the name or the SKU, in any case.
+          schema:
+            type: string
+        - name: category_id
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, inactive]
+        - name: stock
+          in: query
+          description: The stock condition (`stock_status`).
+          schema:
+            $ref: "#/components/schemas/StockStatus"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of menus.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MenuList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createMenu
+      tags: [menu]
+      summary: Create a menu
+      description: |
+        Needs `menu.manage`. A tracked menu (`track_stock`) starts from
+        `initial_stock`, its first stock movement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MenuInput"
+      responses:
+        "201":
+          description: The new menu.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Menu"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          $ref: "#/components/responses/MenuSKUTaken"
+        "422":
+          $ref: "#/components/responses/MenuRejected"
+
+  /api/v1/outlets/{oid}/menus/{mid}:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/MenuID"
+    get:
+      operationId: getMenu
+      tags: [menu]
+      summary: One menu
+      description: Needs `menu.view`.
+      responses:
+        "200":
+          description: The menu.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Menu"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/MenuNotFound"
+    put:
+      operationId: updateMenu
+      tags: [menu]
+      summary: Change a menu
+      description: |
+        Needs `menu.manage`. Every field but the stock count and the status
+        (`is_active` is ignored here). A price change leaves past sales as
+        they were. Turning `track_stock` on needs `initial_stock`, the count it
+        starts from; once tracked, the count only changes through stock
+        adjustments. Turning it off keeps the count and its history, unused.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MenuInput"
+      responses:
+        "200":
+          description: The changed menu.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Menu"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/MenuNotFound"
+        "409":
+          $ref: "#/components/responses/MenuSKUTaken"
+        "422":
+          $ref: "#/components/responses/MenuRejected"
+    delete:
+      operationId: deleteMenu
+      tags: [menu]
+      summary: Delete a menu
+      description: |
+        Needs `menu.manage`. Past sales keep its name and price; its SKU is free
+        again.
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/MenuNotFound"
+
+  /api/v1/outlets/{oid}/menus/{mid}/status:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/MenuID"
+    patch:
+      operationId: setMenuStatus
+      tags: [menu]
+      summary: Show or hide a menu at the cashier
+      description: |
+        Needs `menu.manage`. An inactive menu is hidden at the cashier; it stays
+        in the admin area and the reports.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActiveRequest"
+      responses:
+        "200":
+          description: The menu.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Menu"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/MenuNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /api/v1/outlets/{oid}/menus/{mid}/stock-adjustments:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/MenuID"
+    post:
+      operationId: adjustStock
+      tags: [menu]
+      summary: Add, take away or count a menu's stock
+      description: |
+        Needs `stock.adjust`, on a tracked menu. `in` adds `qty` and `out`
+        takes it away (1 to 1,000,000 at once); `set` is a stock take, the
+        count found (0 to 1,000,000), recorded even when it matches. The count
+        never goes below zero this way, nor above 1,000,000.
+
+        The menu is locked while its count changes, so adjustments made
+        together each start from the count the one before left: none is lost.
+        Each is a stock movement and a Log Action entry (`stock.adjusted`,
+        with the count before and after, the type, the reason and the note).
+        Answers with the menu as the adjustment left it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StockAdjustmentInput"
+      responses:
+        "200":
+          description: The menu, with its new count and condition.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Menu"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/MenuNotFound"
+        "409":
+          $ref: "#/components/responses/StockRefused"
+        "422":
+          $ref: "#/components/responses/StockAdjustmentRejected"
+
+  /api/v1/outlets/{oid}/menus/{mid}/stock-alert:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/MenuID"
+    put:
+      operationId: setStockAlert
+      tags: [menu]
+      summary: Set a menu's stock alert
+      description: |
+        Needs `stock.adjust` or `menu.manage` (the alert is a field of the
+        menu form too), on a tracked menu. At or below the alert, stock is
+        `low`; null or 0 turns the alert off. The count stays as it is. A
+        change is a `menu.updated` Log Action entry; the alert the menu
+        already has records nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StockAlertRequest"
+      responses:
+        "200":
+          description: The menu, with its alert and condition.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Menu"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/MenuNotFound"
+        "409":
+          $ref: "#/components/responses/StockNotTracked"
+        "422":
+          $ref: "#/components/responses/StockAlertRejected"
+
+  /api/v1/outlets/{oid}/menus/{mid}/stock-movements:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/MenuID"
+    get:
+      operationId: listStockMovements
+      tags: [menu]
+      summary: A menu's stock history
+      description: |
+        Needs `menu.view`. Newest first, in the order the count changed in,
+        each naming who made it (a deleted account keeps its name here). A
+        menu whose tracking was turned off keeps its history; its count adds
+        up to the history's `qty_change`.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of the history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StockMovementList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/MenuNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /api/v1/outlets/{oid}/devices:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listDevices
+      tags: [device]
+      summary: The outlet's cashier devices
+      description: |
+        The outlet's Manager, or the Owner. Those in use first, then the
+        revoked, each by code.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of devices.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: activateDevice
+      tags: [device]
+      summary: Make this device one of the outlet's cashiers
+      description: |
+        Sent from the device itself, by the outlet's Manager signed in on it;
+        not the Owner, who runs no till. The device gets the next code (`K01`,
+        `K02`, …, never used again, since it is in the receipt numbers it
+        makes) and a token only it holds:
+
+        - a browser (`platform: web`) as the `maki_device` cookie: `HttpOnly`,
+          `SameSite=Strict`, 400 days, and sent again each time the cashier
+          starts, so a device in use keeps it;
+        - the Android app (`platform: android`) in the body, to keep in its
+          secure storage and send as `X-Device-Token`.
+
+        A request whose device is the outlet's already, and in use, is 409
+        `device_already_active`. Recorded as `device.activated`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivateDeviceRequest"
+      responses:
+        "201":
+          description: The device, and the app's token.
+          headers:
+            Set-Cookie:
+              description: "`maki_device`, for `platform: web`."
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivatedDevice"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          $ref: "#/components/responses/DeviceActive"
+        "422":
+          $ref: "#/components/responses/DeviceRejected"
+
+  /api/v1/outlets/{oid}/devices/{did}:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/DeviceID"
+    delete:
+      operationId: revokeDevice
+      tags: [device]
+      summary: Revoke a device
+      description: |
+        The outlet's Manager, or the Owner. The device can't sell from then
+        on; a sale it has in progress finishes first. Revoking a revoked
+        device changes nothing. Recorded as `device.revoked`.
+      responses:
+        "204":
+          description: Revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/DeviceNotFound"
+
+  /api/v1/outlets/{oid}/pos/catalog:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: getPosCatalog
+      tags: [order]
+      summary: Everything the cashier sells from
+      description: |
+        Needs `checkout.create`. In one answer, so a device can later keep it
+        offline whole: the outlet for the receipt, with its rates; the
+        payment methods it takes; and its menus in the cashier's order, with
+        the categories that hold them.
+
+        The menus are the active menus of active categories. Those that can
+        be sold come first, out of stock last; within each, by the
+        categories' order, then name. Inactive and deleted menus aren't
+        there at all. The stock is as it is now: the cashier loads the
+        catalog again after each sale, and now and then.
+      responses:
+        "200":
+          description: The catalog.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PosCatalog"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+
+  /api/v1/outlets/{oid}/pos/device:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: getPosDevice
+      tags: [order]
+      summary: The device the cashier runs on, and its receipt numbers today
+      description: |
+        Needs `checkout.create`, from one of the outlet's devices in use:
+        sent as the cashier starts. Marks the device seen, and sends a
+        browser's `maki_device` cookie again, so a device in use keeps it.
+
+        The device makes each receipt number itself:
+        `order_no_prefix-YYYYMMDD-NNNN`, with the outlet's day and the
+        device's count that day, at least four digits. `next_number` is the
+        count its next one today takes; a new day starts it at 1. The
+        cashier asks again after `order_no_taken`.
+      security:
+        - accessToken: []
+          deviceCookie: []
+        - accessToken: []
+          deviceToken: []
+      responses:
+        "200":
+          description: The device.
+          headers:
+            Set-Cookie:
+              description: "`maki_device` again, for a browser."
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PosDevice"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/DeviceCantSell"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+
+  /api/v1/outlets/{oid}/orders:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listOrders
+      tags: [order]
+      summary: Today's orders
+      description: |
+        Needs `checkout.create` or `order.void`. The outlet's orders made
+        today, in its time zone, newest first, voided ones included. `q`
+        narrows them to the receipt numbers holding it, in any case.
+      parameters:
+        - name: q
+          in: query
+          description: Part of a receipt number.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of today's orders.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createOrder
+      tags: [order]
+      summary: Take an order the cashier charged for
+      description: |
+        Needs `checkout.create`, from one of the outlet's devices in use.
+        The device makes the order's ID (a CUID2) and its receipt number, so
+        the ID is the order's idempotency key: sending the same order again,
+        as after a lost answer, answers 200 with the order as it was taken,
+        never a second one, even from a device revoked since. The same ID
+        with anything else in it, or from another outlet, is 409
+        `order_id_conflict`.
+
+        Everything is checked in one transaction, against the outlet as it
+        is when the order arrives:
+
+        - the receipt number is the device's (`order_no_prefix` of
+          `GET …/pos/device`), carries the outlet's day of
+          `client_created_at`, and isn't taken (409 `order_no_taken`: the
+          cashier asks for the next number and sends the order again);
+        - the payment method is on (409 `payment_method_unavailable`);
+        - each menu is on sale (409 `menu_unavailable`, `details.menus` its
+          IDs), at the price the cashier showed (409 `prices_changed`,
+          `details.menus` each `menu_id` with its `price`), with stock enough
+          for its lines together (409 `order_stock_insufficient`,
+          `details.menus` each `menu_id` with what is `available`);
+        - the voucher, when `voucher_code` names one, is for the sale, as
+          `POST …/vouchers/validate` checks it (404 `voucher_not_found`, 409
+          `voucher_not_for_outlet`, `voucher_inactive`, `voucher_expired`,
+          `voucher_used_up`, `voucher_not_started`), and the subtotal
+          reaches its minimum spend (409 `voucher_min_spend`,
+          `details.min_spend`): the cashier takes it off and says why;
+        - the order fits how the outlet seats its dine-in customers now
+          (`dine_in_mode`): where they sit at tables, no `stand_number`;
+          where they take number stands, no `table_id`, and a dine-in order
+          carries its stand's `stand_number` (409 `dine_in_mode_changed`,
+          `details.mode` the outlet's). The Manager changed it since the
+          catalog was loaded: the cashier loads it again, takes the table or
+          the number off, and says why;
+        - the table, when `table_id` names one (dine-in only), can be sat at:
+          the outlet's, not deleted, and available or occupied (409
+          `table_unavailable`, `details.status` the table's, `inactive` or
+          `scheduled`, or `missing`): the cashier takes it off and says why;
+        - `total` is the server's, from those prices, the voucher's terms
+          and the outlet's rates (409 `total_changed`, `details.total` the
+          server's): subtotal, less the voucher's discount, then the service
+          charge on that, then the tax on both, each rounded to the nearest
+          rupiah, half up. `api/test-vectors/order-totals.json` and
+          `voucher-discounts.json` hold worked cases.
+
+        The menus are locked in the order of their IDs, so two cashiers
+        selling the last one at once sell it once; then the voucher, so two
+        outlets taking its last use at once take it once; then the outlet's
+        dine-in mode, shared, so a change of it waits for the sale; then the
+        table, shared with other sales at it, so a change, a release or a
+        delete of it waits for the sale. Then the order, with its voucher's
+        code and its table's name as they are and its stand's number, its
+        lines with the menus' names and prices as they are, and its payment
+        are saved; tracked stock goes
+        down, a sale movement per menu; the voucher's use is taken; and the
+        Log Action records `order.created`. Cash gives change from
+        `received`.
+      security:
+        - accessToken: []
+          deviceCookie: []
+        - accessToken: []
+          deviceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderRequest"
+      responses:
+        "201":
+          description: The order taken.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "200":
+          description: The order as it was taken, for a resend.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/DeviceCantSell"
+        "404":
+          $ref: "#/components/responses/SaleNotFound"
+        "409":
+          $ref: "#/components/responses/OrderRefused"
+        "422":
+          $ref: "#/components/responses/OrderRejected"
+
+  /api/v1/outlets/{oid}/orders/{orid}:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/OrderID"
+    get:
+      operationId: getOrder
+      tags: [order]
+      summary: An order, with its lines and payment
+      description: |
+        Needs `checkout.create` or `order.void`. For the receipt, printed
+        again, and the void.
+      responses:
+        "200":
+          description: The order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OrderNotFound"
+
+  /api/v1/outlets/{oid}/orders/{orid}/void:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/OrderID"
+    post:
+      operationId: voidOrder
+      tags: [order]
+      summary: Void an order
+      description: |
+        Needs `order.void`, and a reason. The order and its payment become
+        `void`; nothing else of them changes. What it sold goes back to the
+        stock of its menus still tracked, a void movement per menu; a
+        deleted menu's stock stays as it is. Its voucher's use is given
+        back, the voucher turned off since or not. Recorded as
+        `order.voided`. An order is voided once (409 `order_already_void`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VoidOrderRequest"
+      responses:
+        "200":
+          description: The order, void.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OrderNotFound"
+        "409":
+          $ref: "#/components/responses/OrderAlreadyVoid"
+        "422":
+          $ref: "#/components/responses/VoidRejected"
+
+  /api/v1/vouchers:
+    get:
+      operationId: listVouchers
+      tags: [voucher]
+      summary: List the vouchers
+      description: |
+        The Owner only. The ones that run out last come first, then by code;
+        deleted vouchers never show.
+      parameters:
+        - name: q
+          in: query
+          description: Part of the code or the name, in any case.
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/VoucherStatus"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of vouchers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoucherList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createVoucher
+      tags: [voucher]
+      summary: Create a voucher
+      description: |
+        The Owner only. Active unless `is_active` says otherwise. Recorded as
+        `voucher.created`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VoucherInput"
+      responses:
+        "201":
+          description: The new voucher.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Voucher"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/VoucherCodeTaken"
+        "422":
+          $ref: "#/components/responses/VoucherRejected"
+
+  /api/v1/vouchers/{vid}:
+    parameters:
+      - $ref: "#/components/parameters/VoucherID"
+    get:
+      operationId: getVoucher
+      tags: [voucher]
+      summary: One voucher
+      description: The Owner only.
+      responses:
+        "200":
+          description: The voucher.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Voucher"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/VoucherNotFound"
+    put:
+      operationId: updateVoucher
+      tags: [voucher]
+      summary: Change a voucher
+      description: |
+        The Owner only. Every field but the status (`is_active` here is
+        ignored). Before a sale has used the voucher everything may change;
+        once one has (`first_used_at`), voided since or not, its code and
+        type stay, its quota only grows and its expiry only moves later. A
+        new expiry is in the future either way. Recorded as
+        `voucher.updated`, with the fields that changed; a change of nothing
+        records nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VoucherInput"
+      responses:
+        "200":
+          description: The changed voucher.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Voucher"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/VoucherNotFound"
+        "409":
+          $ref: "#/components/responses/VoucherCodeTaken"
+        "422":
+          $ref: "#/components/responses/VoucherRejected"
+    delete:
+      operationId: deleteVoucher
+      tags: [voucher]
+      summary: Delete a voucher no sale has used
+      description: |
+        The Owner only. The voucher disappears from every list, and its code
+        is free again. A voucher a sale has used stays with the orders that
+        name it (409 `voucher_used`): deactivate it instead. Recorded as
+        `voucher.deleted`.
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/VoucherNotFound"
+        "409":
+          description: A sale has used the voucher (`voucher_used`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/vouchers/{vid}/status:
+    parameters:
+      - $ref: "#/components/parameters/VoucherID"
+    patch:
+      operationId: setVoucherStatus
+      tags: [voucher]
+      summary: Turn a voucher on or off
+      description: |
+        The Owner only. Off, no sale can take it from the next one on; its
+        history stays. Recorded as `voucher.activated` or
+        `voucher.deactivated`; setting it as it is records nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActiveRequest"
+      responses:
+        "200":
+          description: The voucher.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Voucher"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/VoucherNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /api/v1/vouchers/{vid}/redemptions:
+    parameters:
+      - $ref: "#/components/parameters/VoucherID"
+    get:
+      operationId: listVoucherRedemptions
+      tags: [voucher]
+      summary: The sales that used a voucher
+      description: |
+        The Owner only. In every outlet, newest first, voided ones too: a
+        void gave its use back.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of the voucher's sales.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoucherRedemptionList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/VoucherNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /api/v1/outlets/{oid}/vouchers:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listOutletVouchers
+      tags: [voucher]
+      summary: The vouchers an outlet's cashier can take
+      description: |
+        The outlet's Manager, and the Owner. The vouchers for every outlet
+        and for this one among others, whatever their status, sorted as the
+        Owner's list. Of the outlets a voucher is for, only this one shows.
+      parameters:
+        - name: q
+          in: query
+          description: Part of the code or the name, in any case.
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/VoucherStatus"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of vouchers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoucherList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /api/v1/outlets/{oid}/vouchers/validate:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    post:
+      operationId: validateVoucher
+      tags: [voucher]
+      summary: Check the code a customer gave
+      description: |
+        Needs `checkout.create`, from one of the outlet's devices in use, as
+        a sale does, so codes can't be tried from anywhere. Takes nothing:
+        the sale takes its use, when it is saved.
+
+        Answers the voucher's terms, for the cashier to work its discount
+        out again as the cart changes, and its discount on `subtotal` now.
+        `applies` is false while `subtotal` is short of `min_spend`: the
+        cart may still grow, and the cashier holds the payment until it
+        does. A voucher the sale can't take is refused, first for an outlet
+        it isn't for, then by its status.
+      security:
+        - accessToken: []
+          deviceCookie: []
+        - accessToken: []
+          deviceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidateVoucherRequest"
+      responses:
+        "200":
+          description: The voucher, and its discount.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoucherQuote"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/DeviceCantSell"
+        "404":
+          description: |
+            No voucher with this code (`voucher_not_found`), or an outlet the
+            caller may not act in (`outlet_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          $ref: "#/components/responses/VoucherRefused"
+        "422":
+          description: |
+            A field breaks a rule (`validation_failed`): `code` `required`;
+            `subtotal` `required` or `range` (0–1,000,000,000).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/outlets/{oid}/areas:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listAreas
+      tags: [table]
+      summary: The outlet's dining areas
+      description: |
+        Needs `table.view`. In their order (`sort_order`, then the name);
+        deleted areas never show.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of areas.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AreaList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createArea
+      tags: [table]
+      summary: Create an area
+      description: Needs `table.manage`. It goes last in the order, with an empty canvas.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AreaInput"
+      responses:
+        "201":
+          description: The new area.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Area"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          $ref: "#/components/responses/AreaNameTaken"
+        "422":
+          $ref: "#/components/responses/AreaRejected"
+
+  /api/v1/outlets/{oid}/areas/order:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    put:
+      operationId: reorderAreas
+      tags: [table]
+      summary: Put the areas in a new order
+      description: |
+        Needs `table.manage`. `area_ids` lists every area of the outlet, each
+        once, in the new order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AreaOrderRequest"
+      responses:
+        "204":
+          description: In the new order.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          description: |
+            The list isn't the outlet's areas as they are now, each once
+            (`areas_changed`): one was added or deleted since it was read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/outlets/{oid}/areas/{aid}:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/AreaID"
+    get:
+      operationId: getArea
+      tags: [table]
+      summary: One area
+      description: Needs `table.view`.
+      responses:
+        "200":
+          description: The area.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Area"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/AreaNotFound"
+    put:
+      operationId: updateArea
+      tags: [table]
+      summary: Rename an area
+      description: Needs `table.manage`. A name as it is records nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AreaInput"
+      responses:
+        "200":
+          description: The area.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Area"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/AreaNotFound"
+        "409":
+          $ref: "#/components/responses/AreaNameTaken"
+        "422":
+          $ref: "#/components/responses/AreaRejected"
+    delete:
+      operationId: deleteArea
+      tags: [table]
+      summary: Delete an area
+      description: |
+        Needs `table.manage`. Only an area that holds no table, deleted ones
+        aside; its canvas goes with it, and its name is free again.
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/AreaNotFound"
+        "409":
+          description: |
+            The area still holds tables (`area_not_empty`); `details.tables`
+            counts them.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/outlets/{oid}/areas/{aid}/layout:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/AreaID"
+    get:
+      operationId: getLayout
+      tags: [table]
+      summary: An area's layout
+      description: |
+        Needs `table.view`. Its decorations, and its tables with their
+        statuses now, placed or not.
+      responses:
+        "200":
+          description: The layout.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Layout"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/AreaNotFound"
+    put:
+      operationId: saveLayout
+      tags: [table]
+      summary: Save an area's whole layout
+      description: |
+        Needs `table.manage`. The editor saves the whole layout at once: the
+        tables in `tables` placed in their boxes, the area's others off the
+        layout, and its decorations. It saves on the version it opened; the
+        layout as it is records nothing and keeps its version.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LayoutInput"
+      responses:
+        "200":
+          description: The layout as saved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Layout"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/AreaNotFound"
+        "409":
+          description: |
+            The layout or a table in the area changed since the editor
+            opened it (`layout_changed`); `details.version` is the area's
+            now. The editor reloads, then arranges it again.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          $ref: "#/components/responses/LayoutRejected"
+
+  /api/v1/outlets/{oid}/tables:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listTables
+      tags: [table]
+      summary: The outlet's tables
+      description: |
+        Needs `table.view`. By area, in the areas' order, then by name as
+        people read numbers ("Meja 2" before "Meja 10"), with their statuses
+        now.
+      parameters:
+        - name: area_id
+          in: query
+          description: One area's tables.
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/TableStatus"
+        - name: q
+          in: query
+          description: Part of the name, in any case.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of tables.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TableList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createTable
+      tags: [table]
+      summary: Create a table
+      description: |
+        Needs `table.manage`. It isn't placed on its area's layout yet; the
+        area's layout version moves on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TableInput"
+      responses:
+        "201":
+          description: The new table.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Table"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          $ref: "#/components/responses/TableNameTaken"
+        "422":
+          $ref: "#/components/responses/TableRejected"
+
+  /api/v1/outlets/{oid}/tables/{tid}:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/TableID"
+    get:
+      operationId: getTable
+      tags: [table]
+      summary: One table
+      description: Needs `table.view`.
+      responses:
+        "200":
+          description: The table, with its status now.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Table"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/TableNotFound"
+    put:
+      operationId: updateTable
+      tags: [table]
+      summary: Change a table
+      description: |
+        Needs `table.manage`. A table moved to another area leaves its place
+        on the old one's layout; both layouts' versions move on. A change of
+        nothing records nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TableInput"
+      responses:
+        "200":
+          description: The table.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Table"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/TableNotFound"
+        "409":
+          $ref: "#/components/responses/TableNameTaken"
+        "422":
+          $ref: "#/components/responses/TableRejected"
+    delete:
+      operationId: deleteTable
+      tags: [table]
+      summary: Delete a table
+      description: |
+        Needs `table.manage`. Only a table nobody is seated at; a sale at it
+        under way finishes first, and counts. Its name is free again.
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/TableNotFound"
+        "409":
+          description: Customers are seated at it (`table_occupied`); the cashier releases it first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/outlets/{oid}/tables/{tid}/status:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/TableID"
+    patch:
+      operationId: setTableStatus
+      tags: [table]
+      summary: Turn a table on or off at the cashier
+      description: |
+        Needs `table.manage`. It stays on its layout either way; a table
+        customers are seated at stays occupied until it is released.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActiveRequest"
+      responses:
+        "200":
+          description: The table.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Table"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/TableNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /api/v1/outlets/{oid}/tables/{tid}/release:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/TableID"
+    post:
+      operationId: releaseTable
+      tags: [table]
+      summary: Release a table its customers have left
+      description: |
+        Needs `checkout.create`. The sales before it no longer seat anyone
+        there; a sale at it under way finishes first, and is released too.
+        A table nobody is seated at stays as it is, and records nothing.
+      responses:
+        "200":
+          description: The table, with its status now.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Table"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/TableNotFound"
+
+  /api/v1/outlets/{oid}/table-schedules:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listTableSchedules
+      tags: [table]
+      summary: The outlet's table schedules
+      description: Needs `table.view`. The latest first, past ones and cancelled ones included.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/ScheduleStatus"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of schedules.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduleList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createTableSchedule
+      tags: [table]
+      summary: Take tables out of service for a time
+      description: |
+        Needs `table.manage`. Its tables are `scheduled` from its start until
+        its end. One that overlaps another schedule at a table is a warning
+        (409 `schedule_overlaps`) until it is sent with `confirm_overlap`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleInput"
+      responses:
+        "201":
+          description: The new schedule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          $ref: "#/components/responses/ScheduleRefused"
+        "422":
+          $ref: "#/components/responses/ScheduleRejected"
+
+  /api/v1/outlets/{oid}/table-schedules/{sid}:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+      - $ref: "#/components/parameters/ScheduleID"
+    get:
+      operationId: getTableSchedule
+      tags: [table]
+      summary: One schedule
+      description: Needs `table.view`.
+      responses:
+        "200":
+          description: The schedule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/ScheduleNotFound"
+    put:
+      operationId: updateTableSchedule
+      tags: [table]
+      summary: Change a schedule
+      description: |
+        Needs `table.manage`, and a schedule that isn't over. One under way
+        keeps the start it has, past or not; overlaps are as for a new one.
+        A change of nothing records nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleInput"
+      responses:
+        "200":
+          description: The schedule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/ScheduleNotFound"
+        "409":
+          $ref: "#/components/responses/ScheduleRefused"
+        "422":
+          $ref: "#/components/responses/ScheduleRejected"
+    delete:
+      operationId: cancelTableSchedule
+      tags: [table]
+      summary: Cancel a schedule
+      description: |
+        Needs `table.manage`, and a schedule that isn't over. Its tables are
+        back in service; it stays as a record, with who cancelled it.
+      responses:
+        "204":
+          description: Cancelled.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/ScheduleNotFound"
+        "409":
+          $ref: "#/components/responses/ScheduleRefused"
+
+  /api/v1/outlets/{oid}/pos/tables:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: getPosTables
+      tags: [table]
+      summary: The cashier's floor
+      description: |
+        Needs `checkout.create`. The outlet's areas that hold tables, in
+        order, with their decorations, and their tables with their statuses
+        now; the cashier picks a table from it, and releases one. Where the
+        outlet seats its customers by number stands (`dine_in_mode`
+        `number`), `areas` is empty: there is no table to pick.
+      responses:
+        "200":
+          description: The floor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Floor"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+
+  /api/v1/outlets/{oid}/dine-in-mode:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: getDineInMode
+      tags: [table]
+      summary: How the outlet seats its dine-in customers
+      description: |
+        Needs `table.view`; the Owner reads any outlet's. The cashier reads
+        it in the catalog (`dine_in_mode`).
+      responses:
+        "200":
+          description: The mode.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DineInModeSetting"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+    put:
+      operationId: setDineInMode
+      tags: [table]
+      summary: Choose how the outlet seats its dine-in customers
+      description: |
+        Needs `table.manage`. It holds from the outlet's next sale on: a sale
+        under way finishes first, under the mode it began with. The orders
+        taken keep their tables or their stands, and the areas and tables
+        stay, for the table mode again. Saving the mode the outlet has
+        changes and records nothing; a change is `dine_in_mode.updated` in
+        the Log Action, with what it was. `mode` is `required` and `oneof`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DineInModeSetting"
+      responses:
+        "200":
+          description: The mode, as it is now.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DineInModeSetting"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+components:
+  securitySchemes:
+    accessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: maki_refresh
+    # A cashier device's token, apart from the user signed in on it: a
+    # browser's cookie, or the Android app's header.
+    deviceCookie:
+      type: apiKey
+      in: cookie
+      name: maki_device
+    deviceToken:
+      type: apiKey
+      in: header
+      name: X-Device-Token
+
+  parameters:
+    OutletID:
+      name: oid
+      in: path
+      required: true
+      schema:
+        type: string
+    RoleID:
+      name: rid
+      in: path
+      required: true
+      schema:
+        type: string
+    UserID:
+      name: uid
+      in: path
+      required: true
+      schema:
+        type: string
+    CategoryID:
+      name: cid
+      in: path
+      required: true
+      schema:
+        type: string
+    DeviceID:
+      name: did
+      in: path
+      required: true
+      schema:
+        type: string
+    OrderID:
+      name: orid
+      in: path
+      required: true
+      schema:
+        type: string
+    MenuID:
+      name: mid
+      in: path
+      required: true
+      schema:
+        type: string
+    VoucherID:
+      name: vid
+      in: path
+      required: true
+      schema:
+        type: string
+    AreaID:
+      name: aid
+      in: path
+      required: true
+      schema:
+        type: string
+    TableID:
+      name: tid
+      in: path
+      required: true
+      schema:
+        type: string
+    ScheduleID:
+      name: sid
+      in: path
+      required: true
+      schema:
+        type: string
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  responses:
+    Forbidden:
+      description: The user lacks the permission this needs, or isn't the Owner (`forbidden`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    OutletNotFound:
+      description: |
+        No such outlet, or one the user may not act in (`outlet_not_found`);
+        the two look the same.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    OutletCodeTaken:
+      description: |
+        Another outlet has this code, or had it before it was deleted
+        (`outlet_code_taken`). Receipts print it, so it is never reused.
+        Once the outlet has taken an order its code doesn't change at all
+        (`outlet_code_locked`): every receipt number carries it.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    OutletRejected:
+      description: |
+        A field breaks a rule (`validation_failed`); `details.fields` maps
+        each to the rule: `code` `format`; `name` `required` or `max`;
+        `address`, `phone` `max`; `timezone` `timezone`; `locale` `oneof`;
+        `open_time`, `close_time` `required` (one without the other),
+        `format` or `different`; `tax_pct`, `service_pct` `range` or
+        `decimals`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RoleNotFound:
+      description: |
+        No such role in the outlet (`role_not_found`), or an outlet the user
+        may not act in (`outlet_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RoleForbidden:
+      description: |
+        The caller lacks `role.manage` (`forbidden`), or the role would give
+        a permission they don't hold (`permission_not_held`, with
+        `details.permissions`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RoleNameTaken:
+      description: Another role of the outlet has this name, in any case (`role_name_taken`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RoleRejected:
+      description: |
+        A field breaks a rule (`validation_failed`): `name` `required` or
+        `max`; `description` `max`; `permissions` `oneof` for a code the
+        catalog doesn't have.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    UserNotFound:
+      description: |
+        No such user in the outlet (`user_not_found`), or an outlet the
+        caller may not act in (`outlet_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    StaffForbidden:
+      description: |
+        Refused (403): no `user.manage` (`forbidden`); one's own account
+        (`own_account`); a Manager account, or making one, by anyone but the
+        Owner (`manager_account`); a staff account by the Owner, other than
+        promoting it (`owner_manages_managers`); or a user or role holding a
+        permission the caller lacks (`permission_not_held`, with
+        `details.permissions`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    StaffRejected:
+      description: |
+        A field breaks a rule (`validation_failed`): `name` `required` or
+        `max`; `username` `format`; `email` `email`; `phone` `max`; `role_id`
+        `required` (a staff account needs one) or `exists` (not a role of the
+        outlet). A new password can break its own rules too:
+        `password_too_short`, `password_too_long`, `password_same_as_username`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    CategoryNotFound:
+      description: |
+        No such category in the outlet (`category_not_found`), or an outlet
+        the caller may not act in (`outlet_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    CategoryNameTaken:
+      description: Another category of the outlet has this name, in any case (`category_name_taken`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    CategoryRejected:
+      description: |
+        A field breaks a rule (`validation_failed`): `name` `required` or
+        `max`; `icon` `max` (more than 8 characters) or `format` (not an
+        emoji: letters, spaces, or no pictograph at all, such as `??`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    MenuNotFound:
+      description: |
+        No such menu in the outlet (`menu_not_found`), or an outlet the caller
+        may not act in (`outlet_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    MenuSKUTaken:
+      description: Another menu of the outlet has this SKU, in any case (`menu_sku_taken`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    MenuRejected:
+      description: |
+        A field breaks a rule (`validation_failed`): `name` `required` or
+        `max`; `category_id` `required` or `exists` (not a category of the
+        outlet); `price` `required` or `range`; `description` `max`; `sku`
+        `format`; `initial_stock` `required` (tracking starts) or `range`;
+        `stock_alert` `range`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    StockRefused:
+      description: |
+        The count can't change this way: `stock_insufficient`, taking away
+        more than there is (`details.available` is the count), or
+        `stock_not_tracked`, a menu whose stock isn't tracked.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    StockNotTracked:
+      description: The menu's stock isn't tracked, so it has no alert (`stock_not_tracked`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    StockAdjustmentRejected:
+      description: |
+        A field breaks a rule (`validation_failed`): `type` `required` or
+        `oneof`; `qty` `required` or `range`, also for an addition that would
+        take the count past 1,000,000; `reason` `required` or `oneof`; `note`
+        `max`, or `required` for the reason `other`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    StockAlertRejected:
+      description: The alert is below 0 or above 1,000,000 (`validation_failed`, `stock_alert` `range`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    DeviceNotFound:
+      description: |
+        No such device in the outlet (`device_not_found`), or an outlet the
+        caller may not act in (`outlet_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    DeviceActive:
+      description: The device is the outlet's already, and in use (`device_already_active`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    DeviceRejected:
+      description: |
+        A field breaks a rule (`validation_failed`): `name` `required` or
+        `max` (50 characters); `platform` `required` or `oneof`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    DeviceCantSell:
+      description: |
+        The user lacks `checkout.create` (`forbidden`), or the request comes
+        from no device of the outlet's (`device_not_registered`: no device
+        token, an unknown one, or another outlet's) or from a revoked one
+        (`device_revoked`). `outlet_inactive`: the outlet was deactivated
+        while the order was on its way.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    OrderNotFound:
+      description: |
+        No such order in the outlet (`order_not_found`), or an outlet the
+        caller may not act in (`outlet_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    OrderRefused:
+      description: |
+        The order can't be taken as it is: `order_id_conflict`,
+        `order_no_taken`, `payment_method_unavailable`, `menu_unavailable`,
+        `prices_changed`, `order_stock_insufficient`, a voucher's refusal
+        (`voucher_not_for_outlet`, `voucher_inactive`, `voucher_expired`,
+        `voucher_used_up`, `voucher_not_started`, `voucher_min_spend`),
+        `dine_in_mode_changed`, `table_unavailable` or `total_changed`, as
+        the operation describes.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    OrderRejected:
+      description: |
+        A field breaks a rule (`validation_failed`); `details.fields` maps
+        each to the rule, a line's by its path (`items.0.qty`):
+
+        - `order_id` `required` or `format` (a CUID2);
+        - `order_no` `required`, `format`, `prefix` (not this device's codes)
+          or `date` (not the outlet's day of `client_created_at`);
+        - `type` `required` or `oneof`;
+        - `table_id` `dine_in` (a takeaway has no table);
+        - `stand_number` `dine_in` (a takeaway has no stand), `with_table`
+          (an order is at a table or at a stand) or `format` (1–10 letters,
+          digits and hyphens, a hyphen only between them);
+        - `client_created_at` `required`, or `range`: more than 5 minutes
+          ahead of the server's clock, or more than a day behind;
+        - `items` `required`, `max` (100 lines), or `range` (more than
+          1,000,000,000 together);
+        - `items.N.menu_id` `required` or `format`; `items.N.qty` `required`
+          or `range` (1–999); `items.N.price` `required` or `range`
+          (0–100,000,000); `items.N.note` `max` (100 characters);
+        - `total` `required` or `range`;
+        - `payment` `required`; `payment.method` `required` or `oneof`;
+          `payment.received`, for cash, `required`, `range` (up to
+          100,000,000,000) or `short` (less than `total`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    OrderAlreadyVoid:
+      description: The order is void already (`order_already_void`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    VoidRejected:
+      description: The reason is missing or longer than 200 characters (`validation_failed`, `reason` `required` or `max`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    VoucherNotFound:
+      description: No such voucher, or a deleted one (`voucher_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    VoucherCodeTaken:
+      description: Another voucher has the code (`voucher_code_taken`). A deleted one's is free again.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    VoucherRejected:
+      description: |
+        A field breaks a rule (`validation_failed`); `details.fields` maps
+        each to the rule:
+
+        - `code` `required`, `format` (3–20 letters and digits), or `locked`
+          (a used voucher's stays);
+        - `name` `max` (100 characters);
+        - `type` `required` or `oneof`, or `locked` (a used voucher's stays);
+        - `value` `required` or `range` (a percentage 1–10000 basis points,
+          an amount 1–1,000,000,000);
+        - `max_discount` and `min_spend` `range` (1–1,000,000,000);
+        - `quota` `required`, `range` (1–1,000,000), or `decrease` (a used
+          voucher's only grows);
+        - `expired_at` `required`, `after` (not after `start_at`), `future`
+          (a new expiry that isn't in the future), or `earlier` (a used
+          voucher's only moves later);
+        - `all_outlets` `required`;
+        - `outlet_ids` `required` (none, for a voucher not for every outlet)
+          or `exists` (an outlet that doesn't exist, or was deleted).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    VoucherRefused:
+      description: |
+        The sale can't take the voucher: `voucher_not_for_outlet`, then by
+        its status `voucher_inactive`, `voucher_expired`, `voucher_used_up`
+        or `voucher_not_started`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    AreaNotFound:
+      description: |
+        No such area in the outlet (`area_not_found`), or an outlet the
+        caller may not act in (`outlet_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    AreaNameTaken:
+      description: Another of the outlet's areas has the name, in any case (`area_name_taken`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    AreaRejected:
+      description: |
+        A field breaks a rule (`validation_failed`); `details.fields` maps
+        each to the rule: `name` `required` or `max` (50 characters).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    LayoutRejected:
+      description: |
+        A field breaks a rule (`validation_failed`); `details.fields` maps
+        each to the rule, by its path (`tables.0.x`, `decorations.2.kind`):
+
+        - `version`, `tables` and `decorations` `required` (either list may
+          be empty);
+        - `tables.N.table_id` `required`, `duplicate`, or `exists` (not a
+          table of this area);
+        - `tables.N.x`, `.y`, `.w`, `.h` `required` or `range`: 2–16 cells a
+          side, inside the grid;
+        - `tables.N.rotation` `required` or `oneof` (0, 90, 180, 270);
+          `tables.N.shape` `required` or `oneof`;
+        - `tables.N` `overlap`: tables don't overlap each other;
+        - `decorations` `max` (200); `decorations.N.kind` `required` or
+          `oneof`; `decorations.N.x`, `.y`, `.w`, `.h` `required` or `range`
+          (one cell up to the grid's size, inside it);
+          `decorations.N.rotation` `required` or `oneof`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    TableNotFound:
+      description: |
+        No such table in the outlet, or a deleted one (`table_not_found`),
+        or an outlet the caller may not act in (`outlet_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    TableNameTaken:
+      description: Another of the outlet's tables has the name, in any case (`table_name_taken`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    TableRejected:
+      description: |
+        A field breaks a rule (`validation_failed`); `details.fields` maps
+        each to the rule: `name` `required` or `max` (30 characters);
+        `area_id` `required` or `exists` (not one of the outlet's areas);
+        `capacity` `range` (1–99); `shape` `oneof`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ScheduleNotFound:
+      description: |
+        No such schedule in the outlet (`schedule_not_found`), or an outlet
+        the caller may not act in (`outlet_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ScheduleRejected:
+      description: |
+        A field breaks a rule (`validation_failed`); `details.fields` maps
+        each to the rule:
+
+        - `title` `required` or `max` (100 characters);
+        - `start_at` `required`, or `future`: a new or changed start before
+          the current minute;
+        - `end_at` `required`, `after` (not after `start_at`) or `future`
+          (not in the future);
+        - `table_ids` `required` (none), `max` (500), or `exists` (not a
+          table of the outlet, or a deleted one).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ScheduleRefused:
+      description: |
+        `schedule_closed`: the schedule is finished or cancelled, so it no
+        longer changes. `schedule_overlaps`: another schedule, neither
+        cancelled nor finished, has some of the same tables out at a time
+        this one crosses (one ending as the other starts doesn't);
+        `details.schedules` lists each with its `schedule_id`, `title`,
+        `start_at`, `end_at`, and the `tables` they share, by name. A
+        warning: sent again with `confirm_overlap`, it is saved.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    SaleNotFound:
+      description: |
+        An outlet the caller may not act in (`outlet_not_found`), or no
+        voucher with the order's `voucher_code` (`voucher_not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    InvalidRequest:
+      description: The body isn't the JSON this endpoint takes (`invalid_request`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ValidationFailed:
+      description: |
+        A field is missing or invalid (`validation_failed`).
+        `details.fields` maps each field to the rule it broke.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    PasswordRejected:
+      description: |
+        A field is missing or invalid (`validation_failed`), the current
+        password is wrong (`wrong_password`), or the new password breaks a
+        rule: `password_too_short` (`details.min`), `password_too_long`
+        (`details.max`), `password_same_as_username`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: |
+        No valid access token, or its session ended (`unauthorized`). Refresh
+        once; if that fails too, sign the user out.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    PasswordChangeRequired:
+      description: The user must change their password first (`password_change_required`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RateLimited:
+      description: Too many attempts (`rate_limited`). Wait `Retry-After` seconds.
+      headers:
+        Retry-After:
+          description: Seconds to wait.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+  schemas:
+    Status:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          examples: [ok, ready]
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/Error"
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable, machine-readable error code that clients switch on.
+          examples: [stock_insufficient]
+        message:
+          type: string
+          description: |
+            Safe to show to the user, in the language of `Accept-Language`
+            (Indonesian by default); a fallback when the client has no
+            translation for `code`.
+        details:
+          type: object
+          additionalProperties: true
+          description: Machine-readable extra data, such as the remaining stock.
+        request_id:
+          type: string
+          description: Matches the X-Request-ID response header and the server logs.
+
+    LoginRequest:
+      type: object
+      required: [username, password, client]
+      properties:
+        username:
+          type: string
+          description: Compared without regard to case.
+          examples: [kasir.bdg01]
+        password:
+          type: string
+          format: password
+        client:
+          type: string
+          enum: [web, mobile]
+          description: Where the refresh token goes — a cookie for `web`, the body for `mobile`.
+    RefreshRequest:
+      type: object
+      properties:
+        refresh_token:
+          type: string
+          description: The Android app's refresh token. The web app sends none; its cookie is used.
+    Session:
+      type: object
+      required: [access_token, token_type, expires_in, user]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Seconds until the access token expires (900). Relative, so a wrong device clock doesn't matter.
+          examples: [900]
+        refresh_token:
+          type: string
+          description: "Only for `client: mobile`. Store it in secure storage; it replaces the previous one."
+        refresh_expires_in:
+          type: integer
+          description: Only with `refresh_token`. Seconds until it expires if unused.
+          examples: [2592000]
+        user:
+          $ref: "#/components/schemas/Me"
+    Me:
+      type: object
+      required:
+        - user_id
+        - username
+        - name
+        - email
+        - email_verified
+        - pending_email
+        - locale
+        - language
+        - is_owner
+        - is_manager
+        - outlet_id
+        - must_change_password
+        - permissions
+        - outlet
+      properties:
+        user_id:
+          type: string
+          examples: [tz4a98xxat96iws9zmbrgj3a]
+        username:
+          type: string
+        name:
+          type: string
+        email:
+          type: [string, "null"]
+          format: email
+        email_verified:
+          type: boolean
+        pending_email:
+          type: [string, "null"]
+          format: email
+          description: An address waiting to be confirmed, after `PUT /me/email`.
+        locale:
+          type: [string, "null"]
+          description: The user's own language choice; `null` follows the outlet.
+          examples: [en]
+        language:
+          type: string
+          description: The language the user sees, after the fallbacks (own choice, outlet, `id`).
+          examples: [id]
+        is_owner:
+          type: boolean
+        is_manager:
+          type: boolean
+        outlet_id:
+          type: [string, "null"]
+          description: "`null` for the Owner."
+        must_change_password:
+          type: boolean
+        permissions:
+          type: array
+          items:
+            type: string
+          description: >-
+            What the user may do, sorted: in their outlet, or for the Owner in
+            any outlet. Clients show what these allow; the server checks them
+            on every request regardless.
+          examples: [[checkout.create, menu.view]]
+        outlet:
+          description: "The user's outlet; `null` for the Owner."
+          oneOf:
+            - $ref: "#/components/schemas/OutletSummary"
+            - type: "null"
+    OutletSummary:
+      type: object
+      required: [outlet_id, code, name, timezone, locale]
+      properties:
+        outlet_id:
+          type: string
+        code:
+          type: string
+          examples: [BDG01]
+        name:
+          type: string
+        timezone:
+          type: string
+          description: IANA name. Every time of the outlet shows in this zone.
+          examples: [Asia/Jakarta]
+        locale:
+          type: string
+          description: The outlet's default language.
+          examples: [id]
+    ListMeta:
+      type: object
+      required: [page, page_size, total]
+      properties:
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+          description: Items across every page.
+    ManagerRef:
+      type: object
+      required: [user_id, name]
+      properties:
+        user_id:
+          type: string
+        name:
+          type: string
+    Outlet:
+      type: object
+      required: [outlet_id, code, name, address, phone, timezone, locale, open_time, close_time,
+                 tax_pct, service_pct, status, managers, created_at, updated_at]
+      properties:
+        outlet_id:
+          type: string
+        code:
+          type: string
+          description: Upper-case letters and digits, printed in receipt numbers.
+          examples: [BDG01]
+        name:
+          type: string
+        address:
+          type: [string, "null"]
+        phone:
+          type: [string, "null"]
+        timezone:
+          type: string
+          description: IANA name. Every time of the outlet shows in this zone.
+          examples: [Asia/Jakarta]
+        locale:
+          type: string
+          description: The default language, for receipts and users who haven't chosen one.
+          enum: [id, en]
+        open_time:
+          type: [string, "null"]
+          description: "`HH:MM`; `null` together with `close_time` when no hours are set."
+          examples: ["08:00"]
+        close_time:
+          type: [string, "null"]
+          description: "`HH:MM`. Before `open_time` means past midnight."
+          examples: ["22:00"]
+        tax_pct:
+          type: number
+          description: Percentage, at most two decimals.
+          examples: [11]
+        service_pct:
+          type: number
+          examples: [5.5]
+        status:
+          type: string
+          enum: [active, inactive]
+        managers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManagerRef"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    OutletList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Outlet"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    OutletInput:
+      type: object
+      required: [code, name]
+      properties:
+        code:
+          type: string
+          description: 2 to 10 letters and digits; stored in upper case.
+        name:
+          type: string
+          maxLength: 100
+        address:
+          type: [string, "null"]
+          maxLength: 500
+        phone:
+          type: [string, "null"]
+          maxLength: 32
+        timezone:
+          type: string
+          description: IANA name; `Asia/Jakarta` when left out.
+        locale:
+          type: string
+          enum: [id, en]
+          description: "`id` when left out."
+        open_time:
+          type: [string, "null"]
+          description: "`HH:MM`, with `close_time`, or both left out."
+        close_time:
+          type: [string, "null"]
+        tax_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+          default: 0
+        service_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+          default: 0
+    OutletStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [active, inactive]
+    DeleteOutletRequest:
+      type: object
+      required: [confirm_name]
+      properties:
+        confirm_name:
+          type: string
+          description: The outlet's name, typed again.
+    PermissionGroup:
+      type: object
+      required: [module, permissions]
+      properties:
+        module:
+          type: string
+          examples: [menu]
+        permissions:
+          type: array
+          items:
+            type: string
+          examples: [[menu.view, menu.manage, stock.adjust]]
+    PermissionCatalog:
+      type: object
+      required: [groups]
+      properties:
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/PermissionGroup"
+    Role:
+      type: object
+      required: [role_id, name, description, permissions, user_count, created_at, updated_at]
+      properties:
+        role_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+        permissions:
+          type: array
+          items:
+            type: string
+          description: Sorted.
+        user_count:
+          type: integer
+          description: Users who hold the role.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RoleUser:
+      type: object
+      required: [user_id, name, username]
+      properties:
+        user_id:
+          type: string
+        name:
+          type: string
+        username:
+          type: string
+    RoleDetail:
+      description: >-
+        A Role with the users who hold it. Written out rather than with
+        allOf, which the Dart generator merges without the nullable fields.
+      type: object
+      required: [role_id, name, description, permissions, user_count, created_at, updated_at, users]
+      properties:
+        role_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+        permissions:
+          type: array
+          items:
+            type: string
+          description: Sorted.
+        user_count:
+          type: integer
+          description: Users who hold the role.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoleUser"
+    RoleList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    RoleInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 50
+        description:
+          type: [string, "null"]
+          maxLength: 200
+        permissions:
+          type: array
+          items:
+            type: string
+          description: Codes from `GET /api/v1/permissions`.
+    StaffRole:
+      type: object
+      required: [role_id, name]
+      properties:
+        role_id:
+          type: string
+        name:
+          type: string
+    Staff:
+      type: object
+      required: [user_id, name, username, email, phone, is_manager, role, status, must_change_password,
+                 last_login_at, created_at, updated_at]
+      properties:
+        user_id:
+          type: string
+        name:
+          type: string
+        username:
+          type: string
+        email:
+          type: [string, "null"]
+        phone:
+          type: [string, "null"]
+        is_manager:
+          type: boolean
+        role:
+          description: "A staff member's role; `null` for a Manager."
+          oneOf:
+            - $ref: "#/components/schemas/StaffRole"
+            - type: "null"
+        status:
+          type: string
+          enum: [active, inactive]
+        must_change_password:
+          type: boolean
+          description: The user hasn't replaced the password someone else gave them yet.
+        last_login_at:
+          type: [string, "null"]
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    StaffList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Staff"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    CreateStaffRequest:
+      type: object
+      required: [name, username, password]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        username:
+          type: string
+          description: 3 to 32 lowercase letters, digits, dots, dashes or underscores; stored in lower case.
+        email:
+          type: [string, "null"]
+          format: email
+        phone:
+          type: [string, "null"]
+          maxLength: 32
+        password:
+          type: string
+          description: Temporary, 8 to 128 characters.
+        role_id:
+          type: [string, "null"]
+          description: A role of the outlet; required unless `is_manager`.
+        is_manager:
+          type: boolean
+          default: false
+          description: A Manager account, which only the Owner creates.
+    UpdateStaffRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        email:
+          type: [string, "null"]
+          format: email
+        phone:
+          type: [string, "null"]
+          maxLength: 32
+        role_id:
+          type: [string, "null"]
+          description: Required unless `is_manager`.
+        is_manager:
+          type: boolean
+          default: false
+    StaffStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [active, inactive]
+    ResetStaffPasswordRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          description: The temporary password, 8 to 128 characters.
+    Category:
+      type: object
+      required: [category_id, name, icon, sort_order, is_active, menu_count, created_at, updated_at]
+      properties:
+        category_id:
+          type: string
+        name:
+          type: string
+        icon:
+          type: [string, "null"]
+          description: An emoji, on the category's tile and on its menus until they have a photo.
+          example: "🧋"
+        sort_order:
+          type: integer
+          description: Its place in the cashier's order, from 0.
+        is_active:
+          type: boolean
+          description: An inactive category and its menus are hidden at the cashier.
+        menu_count:
+          type: integer
+          description: Menus in it, deleted ones aside.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CategoryList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Category"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    CategoryInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 50
+        icon:
+          type: [string, "null"]
+          description: An emoji, up to 8 characters; no letters or spaces.
+    CategoryOrderRequest:
+      type: object
+      required: [category_ids]
+      properties:
+        category_ids:
+          type: array
+          items:
+            type: string
+          description: Every category of the outlet, each once, in the new order.
+    ActiveRequest:
+      type: object
+      required: [is_active]
+      properties:
+        is_active:
+          type: boolean
+    StockStatus:
+      type: string
+      enum: [untracked, ok, low, out]
+      description: |
+        `untracked`: always available. Tracked stock is `out` at 0 or below,
+        `low` above 0 and at or below `stock_alert`, `ok` otherwise; an alert
+        of 0 or none is off.
+    MenuCategory:
+      type: object
+      required: [category_id, name, icon, is_active]
+      properties:
+        category_id:
+          type: string
+        name:
+          type: string
+        icon:
+          type: [string, "null"]
+        is_active:
+          type: boolean
+    Menu:
+      type: object
+      required: [menu_id, name, description, sku, price, image_url, track_stock, stock_qty, stock_alert,
+                 stock_status, is_active, category, created_at, updated_at]
+      properties:
+        menu_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+        sku:
+          type: [string, "null"]
+        price:
+          type: integer
+          format: int64
+          description: Rupiah.
+          example: 18000
+        image_url:
+          type: [string, "null"]
+          description: The photo on the CDN; null until photos arrive, and for a menu without one.
+        track_stock:
+          type: boolean
+        stock_qty:
+          type: integer
+          description: The count, for a tracked menu.
+        stock_alert:
+          type: [integer, "null"]
+          description: At or below it, stock is low; null or 0 is off.
+        stock_status:
+          $ref: "#/components/schemas/StockStatus"
+        is_active:
+          type: boolean
+          description: An inactive menu is hidden at the cashier.
+        category:
+          $ref: "#/components/schemas/MenuCategory"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    MenuList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Menu"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    MenuInput:
+      type: object
+      required: [name, category_id, price]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        category_id:
+          type: string
+        price:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 100000000
+          description: Rupiah.
+        description:
+          type: [string, "null"]
+          maxLength: 500
+        sku:
+          type: [string, "null"]
+          description: Up to 32 letters, digits, dots, dashes or underscores; unique in the outlet.
+        track_stock:
+          type: boolean
+          default: false
+        initial_stock:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 1000000
+          description: The count tracking starts from; counts only then.
+        stock_alert:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 1000000
+          description: Ignored for an untracked menu.
+        is_active:
+          type: [boolean, "null"]
+          description: For a new menu (active when left out); PATCH …/status changes an existing one's.
+    StockAdjustmentInput:
+      type: object
+      required: [type, qty, reason]
+      properties:
+        type:
+          type: string
+          enum: [in, out, set]
+          description: "`in` adds, `out` takes away, `set` is a stock take: the count found."
+        qty:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+          description: The amount to add or take away (at least 1), or the count found.
+        reason:
+          type: string
+          enum: [restock, damaged, correction, other]
+          description: "`damaged` is damaged or spoiled; `other` says what in `note`."
+        note:
+          type: [string, "null"]
+          maxLength: 200
+          description: Required for the reason `other`. Shown as typed, never translated.
+    StockAlertRequest:
+      type: object
+      properties:
+        stock_alert:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 1000000
+          description: At or below it, stock is low; null or 0 turns the alert off.
+    StockMovementUser:
+      type: object
+      required: [user_id, name]
+      properties:
+        user_id:
+          type: string
+        name:
+          type: string
+    StockMovement:
+      type: object
+      required: [stock_movement_id, type, qty_change, stock_after, reason, note, user, order_id, created_at]
+      properties:
+        stock_movement_id:
+          type: string
+        type:
+          type: string
+          enum: [initial, in, out, set, sale, void]
+          description: |
+            `initial`: the count tracking started from; `in`, `out`, `set`: an
+            adjustment; `sale`, `void`: the cashier's, with their order.
+        qty_change:
+          type: integer
+          description: The change to the count, new minus old; 0 for a stock take that matched.
+          example: -3
+        stock_after:
+          type: integer
+          description: The count it left.
+        reason:
+          type: [string, "null"]
+          enum: [initial, restock, damaged, correction, other, null]
+          description: An adjustment's reason, or `initial`; null for a sale or void.
+        note:
+          type: [string, "null"]
+        user:
+          $ref: "#/components/schemas/StockMovementUser"
+        order_id:
+          type: [string, "null"]
+          description: The order of a sale or void.
+        created_at:
+          type: string
+          format: date-time
+    StockMovementList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/StockMovement"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    DevicePerson:
+      type: object
+      required: [user_id, name]
+      properties:
+        user_id:
+          type: string
+        name:
+          type: string
+    Device:
+      type: object
+      required: [device_id, code, name, platform, status, activated_by, activated_at, last_seen_at, revoked_at, revoked_by]
+      properties:
+        device_id:
+          type: string
+        code:
+          type: string
+          description: In every receipt number the device makes, after the outlet's code.
+          example: K01
+        name:
+          type: string
+          example: Kasir depan
+        platform:
+          type: string
+          enum: [web, android]
+        status:
+          type: string
+          enum: [active, revoked]
+        activated_by:
+          $ref: "#/components/schemas/DevicePerson"
+        activated_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the device last sold, or started the cashier.
+        revoked_at:
+          type: [string, "null"]
+          format: date-time
+        revoked_by:
+          oneOf:
+            - $ref: "#/components/schemas/DevicePerson"
+            - type: "null"
+    DeviceList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Device"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    ActivateDeviceRequest:
+      type: object
+      required: [name, platform]
+      properties:
+        name:
+          type: string
+          maxLength: 50
+          example: Kasir depan
+        platform:
+          type: string
+          enum: [web, android]
+          description: "`web` gets its token as a cookie, `android` in the body."
+    ActivatedDevice:
+      type: object
+      required: [device, token]
+      properties:
+        device:
+          $ref: "#/components/schemas/Device"
+        token:
+          type: [string, "null"]
+          description: The Android app's device token, its one copy; null for a browser, which gets the cookie.
+    PosCatalog:
+      type: object
+      required: [outlet, payment_methods, dine_in_mode, categories, menus]
+      properties:
+        outlet:
+          $ref: "#/components/schemas/PosOutlet"
+        payment_methods:
+          type: array
+          description: The methods the cashier offers, in order.
+          items:
+            $ref: "#/components/schemas/PaymentMethod"
+        dine_in_mode:
+          $ref: "#/components/schemas/DineInMode"
+        categories:
+          type: array
+          description: The active categories holding one of the menus, in the cashier's order.
+          items:
+            $ref: "#/components/schemas/PosCategory"
+        menus:
+          type: array
+          description: In the cashier's order.
+          items:
+            $ref: "#/components/schemas/PosMenu"
+    PosOutlet:
+      type: object
+      required: [outlet_id, code, name, address, phone, timezone, locale, tax_bps, service_bps]
+      properties:
+        outlet_id:
+          type: string
+        code:
+          type: string
+          example: BDG01
+        name:
+          type: string
+        address:
+          type: [string, "null"]
+        phone:
+          type: [string, "null"]
+        timezone:
+          type: string
+          description: Every time the cashier shows, and its receipt numbers' day, is in this zone.
+          example: Asia/Jakarta
+        locale:
+          type: string
+          description: The receipt's language.
+          enum: [id, en]
+        tax_bps:
+          type: integer
+          description: Basis points, so the cashier's totals are exact integers, as the server's are; 1000 is 10%.
+          minimum: 0
+          maximum: 10000
+        service_bps:
+          type: integer
+          minimum: 0
+          maximum: 10000
+    PaymentMethod:
+      type: string
+      enum: [cash, qris, debit]
+    PosCategory:
+      type: object
+      required: [category_id, name, icon, item_count]
+      properties:
+        category_id:
+          type: string
+        name:
+          type: string
+        icon:
+          type: [string, "null"]
+        item_count:
+          type: integer
+          description: How many of the catalog's menus it holds.
+    PosMenu:
+      type: object
+      required: [menu_id, category_id, name, description, sku, price, image_url, track_stock, stock_qty,
+                 stock_alert, stock_status]
+      properties:
+        menu_id:
+          type: string
+        category_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+        sku:
+          type: [string, "null"]
+        price:
+          type: integer
+          format: int64
+          description: Rupiah.
+        image_url:
+          type: [string, "null"]
+          description: The photo's address, with the upload milestone; null until then.
+        track_stock:
+          type: boolean
+        stock_qty:
+          type: [integer, "null"]
+          description: The count, the most one order may take; null when the stock isn't tracked, always available.
+        stock_alert:
+          type: [integer, "null"]
+        stock_status:
+          $ref: "#/components/schemas/StockStatus"
+    PosDevice:
+      type: object
+      required: [device, order_no_prefix, day, next_number]
+      properties:
+        device:
+          $ref: "#/components/schemas/PosDeviceInfo"
+        order_no_prefix:
+          type: string
+          description: The outlet's code and the device's, which start each of its receipt numbers.
+          example: BDG01-K01
+        day:
+          type: string
+          format: date
+          description: Today in the outlet's time zone.
+        next_number:
+          type: integer
+          minimum: 1
+          description: The count the device's next receipt number today takes.
+    PosDeviceInfo:
+      type: object
+      required: [device_id, code, name, platform]
+      properties:
+        device_id:
+          type: string
+        code:
+          type: string
+          example: K01
+        name:
+          type: string
+        platform:
+          type: string
+          enum: [web, android]
+    CreateOrderRequest:
+      type: object
+      required: [order_id, order_no, type, client_created_at, items, total, payment]
+      properties:
+        order_id:
+          type: string
+          description: Made by the device, a CUID2; the order's idempotency key.
+        order_no:
+          type: string
+          example: BDG01-K01-20261001-0001
+        type:
+          $ref: "#/components/schemas/OrderType"
+        table_id:
+          type: [string, "null"]
+          maxLength: 64
+          description: The table a dine-in order seats its customers at; null or blank for none, as it may be.
+        stand_number:
+          type: [string, "null"]
+          maxLength: 64
+          description: |
+            The number on the stand a dine-in customer took, where the outlet
+            seats them by number stands: 1–10 letters, digits and hyphens, a
+            hyphen only between them, kept in capitals. Null or blank for
+            none.
+          example: B-3
+        client_created_at:
+          type: string
+          format: date-time
+          description: When the device made the order.
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/CreateOrderItem"
+        voucher_code:
+          type: [string, "null"]
+          maxLength: 64
+          description: The voucher the customer gave, in any case; one per order. Null or blank for none.
+        total:
+          type: integer
+          format: int64
+          description: What the cashier charged, which must be the server's total.
+        payment:
+          $ref: "#/components/schemas/CreateOrderPayment"
+    CreateOrderItem:
+      type: object
+      required: [menu_id, qty, price]
+      properties:
+        menu_id:
+          type: string
+        qty:
+          type: integer
+          minimum: 1
+          maximum: 999
+        price:
+          type: integer
+          format: int64
+          description: The menu's price, as the cashier showed it.
+        note:
+          type: [string, "null"]
+          maxLength: 100
+          example: less sugar
+    CreateOrderPayment:
+      type: object
+      required: [method]
+      properties:
+        method:
+          $ref: "#/components/schemas/PaymentMethod"
+        received:
+          type: [integer, "null"]
+          format: int64
+          description: Cash, what the customer handed over, at least the total; the other methods have none.
+    OrderType:
+      type: string
+      enum: [dine_in, takeaway]
+    OrderStatus:
+      type: string
+      enum: [paid, void]
+    OrderPerson:
+      type: object
+      required: [user_id, name]
+      properties:
+        user_id:
+          type: string
+        name:
+          type: string
+    Order:
+      type: object
+      required: [order_id, order_no, device_id, type, table_id, table_name, stand_number, status, cashier, items,
+                 subtotal, voucher_code, voucher_discount, service_bps, service, tax_bps, tax, total, payment,
+                 client_created_at, created_at, voided_at, voided_by, void_reason]
+      properties:
+        order_id:
+          type: string
+        order_no:
+          type: string
+          example: BDG01-K01-20261001-0001
+        device_id:
+          type: string
+        type:
+          $ref: "#/components/schemas/OrderType"
+        table_id:
+          type: [string, "null"]
+          description: The table a dine-in sale seated its customers at; null for none.
+        table_name:
+          type: [string, "null"]
+          description: The table's name as it was then, for the receipt; null for none.
+          example: A1
+        stand_number:
+          type: [string, "null"]
+          description: The number on the stand a dine-in customer took, where a waiter brings the order; null for none.
+          example: "12"
+        status:
+          $ref: "#/components/schemas/OrderStatus"
+        cashier:
+          $ref: "#/components/schemas/OrderPerson"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrderItem"
+        subtotal:
+          type: integer
+          format: int64
+        voucher_code:
+          type: [string, "null"]
+          description: The code of the voucher the sale used, as it was then, for the receipt; null for none.
+          example: MERDEKA17
+        voucher_discount:
+          type: integer
+          format: int64
+        service_bps:
+          type: integer
+          description: The rate the order was charged at.
+        service:
+          type: integer
+          format: int64
+        tax_bps:
+          type: integer
+        tax:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
+        payment:
+          $ref: "#/components/schemas/OrderPayment"
+        client_created_at:
+          type: string
+          format: date-time
+          description: When the device made it.
+        created_at:
+          type: string
+          format: date-time
+          description: When the server took it.
+        voided_at:
+          type: [string, "null"]
+          format: date-time
+        voided_by:
+          oneOf:
+            - $ref: "#/components/schemas/OrderPerson"
+            - type: "null"
+        void_reason:
+          type: [string, "null"]
+    OrderItem:
+      type: object
+      required: [order_item_id, menu_id, menu_name, price, qty, note, line_total]
+      properties:
+        order_item_id:
+          type: string
+        menu_id:
+          type: string
+        menu_name:
+          type: string
+          description: The menu's name at the sale.
+        price:
+          type: integer
+          format: int64
+          description: The menu's price at the sale.
+        qty:
+          type: integer
+        note:
+          type: [string, "null"]
+        line_total:
+          type: integer
+          format: int64
+    OrderPayment:
+      type: object
+      required: [method, amount, received, change, status]
+      properties:
+        method:
+          $ref: "#/components/schemas/PaymentMethod"
+        amount:
+          type: integer
+          format: int64
+        received:
+          type: [integer, "null"]
+          format: int64
+        change:
+          type: [integer, "null"]
+          format: int64
+        status:
+          $ref: "#/components/schemas/OrderStatus"
+    OrderSummary:
+      type: object
+      required: [order_id, order_no, device_id, type, table_name, stand_number, status, total, item_count,
+                 payment_method, cashier, client_created_at, created_at]
+      properties:
+        order_id:
+          type: string
+        order_no:
+          type: string
+        device_id:
+          type: string
+        type:
+          $ref: "#/components/schemas/OrderType"
+        table_name:
+          type: [string, "null"]
+          description: The table's name as it was at the sale; null for none.
+        stand_number:
+          type: [string, "null"]
+          description: The number on the customer's stand; null for none.
+        status:
+          $ref: "#/components/schemas/OrderStatus"
+        total:
+          type: integer
+          format: int64
+        item_count:
+          type: integer
+          description: Every line's qty, together.
+        payment_method:
+          $ref: "#/components/schemas/PaymentMethod"
+        cashier:
+          $ref: "#/components/schemas/OrderPerson"
+        client_created_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    OrderList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrderSummary"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    VoidOrderRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 200
+    VoucherStatus:
+      type: string
+      enum: [active, scheduled, used_up, expired, inactive]
+      description: |
+        At the moment the voucher is read, in this order: `inactive`, turned
+        off; `expired`, at or past `expired_at`; `used_up`, every use taken;
+        `scheduled`, before `start_at`; else `active`.
+    VoucherType:
+      type: string
+      enum: [percent, amount]
+      description: |
+        `percent`: `value` is basis points of the subtotal (1000 is 10%),
+        rounded to the nearest rupiah, half up, then held to `max_discount`;
+        `amount`: `value` is rupiah. Either way the discount is never past
+        the subtotal, and comes off it before the service charge and the
+        tax. `api/test-vectors/voucher-discounts.json` holds worked cases.
+    VoucherInput:
+      type: object
+      required: [code, type, value, quota, expired_at, all_outlets]
+      properties:
+        code:
+          type: string
+          description: 3–20 letters and digits, kept in capitals; unique among the vouchers not deleted.
+          example: MERDEKA17
+        name:
+          type: [string, "null"]
+          maxLength: 100
+        type:
+          $ref: "#/components/schemas/VoucherType"
+        value:
+          type: integer
+          format: int64
+          description: Basis points for a percentage (1–10000), rupiah for an amount (1–1,000,000,000).
+        max_discount:
+          type: [integer, "null"]
+          format: int64
+          description: A percentage's most, in rupiah; dropped for an amount.
+        min_spend:
+          type: [integer, "null"]
+          format: int64
+          description: The subtotal the voucher needs, in rupiah.
+        quota:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          description: How many sales may use it, in every outlet together.
+        start_at:
+          type: [string, "null"]
+          format: date-time
+          description: When it starts, to the second; null starts at once.
+        expired_at:
+          type: string
+          format: date-time
+          description: When it stops, to the second; after `start_at`.
+        all_outlets:
+          type: boolean
+          description: Every outlet, those still to come too; else the ones in `outlet_ids`.
+        outlet_ids:
+          type: array
+          maxItems: 1000
+          items:
+            type: string
+          description: The outlets it is for when it isn't for all of them; ignored when it is.
+        is_active:
+          type: [boolean, "null"]
+          description: A new voucher's status, active when left out; ignored by PUT.
+    VoucherOutlet:
+      type: object
+      required: [outlet_id, code, name]
+      properties:
+        outlet_id:
+          type: string
+        code:
+          type: string
+        name:
+          type: string
+    Voucher:
+      type: object
+      required: [voucher_id, code, name, type, value, max_discount, min_spend, quota, used_count, start_at,
+                 expired_at, all_outlets, outlets, is_active, status, first_used_at, created_at, updated_at]
+      properties:
+        voucher_id:
+          type: string
+        code:
+          type: string
+          example: MERDEKA17
+        name:
+          type: [string, "null"]
+        type:
+          $ref: "#/components/schemas/VoucherType"
+        value:
+          type: integer
+          format: int64
+        max_discount:
+          type: [integer, "null"]
+          format: int64
+        min_spend:
+          type: [integer, "null"]
+          format: int64
+        quota:
+          type: integer
+        used_count:
+          type: integer
+          description: The uses taken; a void gives its sale's back.
+        start_at:
+          type: [string, "null"]
+          format: date-time
+        expired_at:
+          type: string
+          format: date-time
+        all_outlets:
+          type: boolean
+        outlets:
+          type: array
+          items:
+            $ref: "#/components/schemas/VoucherOutlet"
+          description: |
+            The outlets it is for, by name, none when it is for all of them.
+            Deleted outlets sell nothing and don't show; an outlet's Manager
+            sees only theirs.
+        is_active:
+          type: boolean
+        status:
+          $ref: "#/components/schemas/VoucherStatus"
+        first_used_at:
+          type: [string, "null"]
+          format: date-time
+          description: When a sale first used it, voided since or not; from then on PUT keeps its code and type, and it can't be deleted.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    VoucherList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Voucher"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    VoucherRedemption:
+      type: object
+      required: [order_id, order_no, outlet, client_created_at, voucher_discount, status]
+      properties:
+        order_id:
+          type: string
+        order_no:
+          type: string
+          example: BDG01-K01-20261001-0001
+        outlet:
+          $ref: "#/components/schemas/VoucherOutlet"
+        client_created_at:
+          type: string
+          format: date-time
+          description: When the cashier charged it.
+        voucher_discount:
+          type: integer
+          format: int64
+        status:
+          $ref: "#/components/schemas/OrderStatus"
+    VoucherRedemptionList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/VoucherRedemption"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    ValidateVoucherRequest:
+      type: object
+      required: [code, subtotal]
+      properties:
+        code:
+          type: string
+          description: As the customer gave it, in any case.
+        subtotal:
+          type: integer
+          format: int64
+          description: The cart's lines together, before any discount.
+    VoucherTerms:
+      type: object
+      required: [voucher_id, code, name, type, value, max_discount, min_spend]
+      properties:
+        voucher_id:
+          type: string
+        code:
+          type: string
+        name:
+          type: [string, "null"]
+        type:
+          $ref: "#/components/schemas/VoucherType"
+        value:
+          type: integer
+          format: int64
+        max_discount:
+          type: [integer, "null"]
+          format: int64
+        min_spend:
+          type: [integer, "null"]
+          format: int64
+    VoucherQuote:
+      type: object
+      required: [voucher, discount, applies]
+      properties:
+        voucher:
+          $ref: "#/components/schemas/VoucherTerms"
+        discount:
+          type: integer
+          format: int64
+          description: The discount on `subtotal`; 0 while it doesn't apply.
+        applies:
+          type: boolean
+          description: False while `subtotal` is short of `min_spend`.
+          example: Salah input
+    Area:
+      type: object
+      required: [area_id, name, sort_order, table_count, created_at, updated_at]
+      properties:
+        area_id:
+          type: string
+        name:
+          type: string
+        sort_order:
+          type: integer
+          description: Its place in the order, from 0.
+        table_count:
+          type: integer
+          description: Tables in it, placed on its layout or not.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AreaList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Area"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    AreaInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 50
+    AreaOrderRequest:
+      type: object
+      required: [area_ids]
+      properties:
+        area_ids:
+          type: array
+          items:
+            type: string
+          description: Every area of the outlet, each once, in the new order.
+    AreaRef:
+      type: object
+      required: [area_id, name]
+      properties:
+        area_id:
+          type: string
+        name:
+          type: string
+    Box:
+      type: object
+      description: |
+        A place on an area's grid of 48 × 32 cells: the top left cell, and
+        the cells across and down.
+      required: [x, y, w, h]
+      properties:
+        x:
+          type: integer
+          minimum: 0
+        y:
+          type: integer
+          minimum: 0
+        w:
+          type: integer
+          minimum: 1
+        h:
+          type: integer
+          minimum: 1
+    Rotation:
+      type: integer
+      enum: [0, 90, 180, 270]
+      description: How a drawing turns inside its box; a quarter turn also swaps the box's width and height.
+    TableShape:
+      type: string
+      enum: [square, round, rectangle]
+    DineInMode:
+      type: string
+      enum: [table, number]
+      description: |
+        How the outlet seats its dine-in customers, one way at a time:
+        `table`, at the tables of its layout, which the cashier may pick (an
+        outlet that never chose sits them so); `number`, wherever they set
+        down the number stand the cashier gave them, where a waiter brings
+        the order. There a dine-in sale carries its stand's number, and no
+        table.
+    DineInModeSetting:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          $ref: "#/components/schemas/DineInMode"
+    TableStatus:
+      type: string
+      enum: [available, occupied, inactive, scheduled]
+      description: |
+        Worked out when read, in this order: `occupied` while customers are
+        seated, `inactive` (turned off), `scheduled` (a schedule under way
+        has it out of service), `available`. The cashier seats an order at
+        an available or an occupied table.
+    Seated:
+      type: object
+      description: The customers seated at a table.
+      required: [since, orders]
+      properties:
+        since:
+          type: string
+          format: date-time
+          description: When the sale that seated them was taken.
+        orders:
+          type: integer
+          description: Sales at the table since.
+    Table:
+      type: object
+      required: [table_id, area, name, capacity, shape, box, rotation, is_active, status, seated, created_at,
+                 updated_at]
+      properties:
+        table_id:
+          type: string
+        area:
+          $ref: "#/components/schemas/AreaRef"
+        name:
+          type: string
+          example: A1
+        capacity:
+          type: [integer, "null"]
+          description: Seats; null when not given.
+        shape:
+          $ref: "#/components/schemas/TableShape"
+        box:
+          description: Its place on its area's layout; null while it isn't placed.
+          oneOf:
+            - $ref: "#/components/schemas/Box"
+            - type: "null"
+        rotation:
+          $ref: "#/components/schemas/Rotation"
+        is_active:
+          type: boolean
+        status:
+          $ref: "#/components/schemas/TableStatus"
+        seated:
+          description: Who is seated there, while the status is `occupied`; null otherwise.
+          oneOf:
+            - $ref: "#/components/schemas/Seated"
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    TableList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Table"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    TableInput:
+      type: object
+      required: [name, area_id]
+      properties:
+        name:
+          type: string
+          maxLength: 30
+        area_id:
+          type: string
+          description: A table moved to another area leaves its place on the old one's layout.
+        capacity:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 99
+        shape:
+          $ref: "#/components/schemas/TableShape"
+        is_active:
+          type: boolean
+          description: For a new table, active when left out; an existing one changes it with `PATCH …/status`.
+    DecorationKind:
+      type: string
+      enum: [wall, cashier, door]
+    Decoration:
+      type: object
+      description: A marker on an area's canvas that isn't a table.
+      required: [kind, x, y, w, h, rotation]
+      properties:
+        kind:
+          $ref: "#/components/schemas/DecorationKind"
+        x:
+          type: integer
+        y:
+          type: integer
+        w:
+          type: integer
+        h:
+          type: integer
+        rotation:
+          $ref: "#/components/schemas/Rotation"
+    Layout:
+      type: object
+      required: [area, version, decorations, tables]
+      properties:
+        area:
+          $ref: "#/components/schemas/AreaRef"
+        version:
+          type: integer
+          description: |
+            Goes up with each change to the layout or to a table in the area;
+            the editor saves on the one it opened.
+        decorations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Decoration"
+        tables:
+          type: array
+          description: Every table in the area, placed or not, by name.
+          items:
+            $ref: "#/components/schemas/Table"
+    Placement:
+      type: object
+      required: [table_id, x, y, w, h, rotation, shape]
+      properties:
+        table_id:
+          type: string
+        x:
+          type: integer
+        y:
+          type: integer
+        w:
+          type: integer
+        h:
+          type: integer
+        rotation:
+          $ref: "#/components/schemas/Rotation"
+        shape:
+          $ref: "#/components/schemas/TableShape"
+    LayoutInput:
+      type: object
+      required: [version, tables, decorations]
+      properties:
+        version:
+          type: integer
+          description: The layout's version as the editor opened it.
+        tables:
+          type: array
+          maxItems: 1000
+          description: The tables placed on it; the area's others come off it.
+          items:
+            $ref: "#/components/schemas/Placement"
+        decorations:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/Decoration"
+    ScheduleStatus:
+      type: string
+      enum: [upcoming, ongoing, finished, cancelled]
+    ScheduleTable:
+      type: object
+      required: [table_id, name, area, deleted]
+      properties:
+        table_id:
+          type: string
+        name:
+          type: string
+        area:
+          $ref: "#/components/schemas/AreaRef"
+        deleted:
+          type: boolean
+          description: Whether the table was deleted since.
+    UserRef:
+      type: object
+      required: [user_id, name]
+      properties:
+        user_id:
+          type: string
+        name:
+          type: string
+    Schedule:
+      type: object
+      required: [schedule_id, title, start_at, end_at, status, tables, created_by, cancelled_at, cancelled_by,
+                 created_at, updated_at]
+      properties:
+        schedule_id:
+          type: string
+        title:
+          type: string
+          example: Acara kantor
+        start_at:
+          type: string
+          format: date-time
+        end_at:
+          type: string
+          format: date-time
+        status:
+          $ref: "#/components/schemas/ScheduleStatus"
+        tables:
+          type: array
+          description: By area, then by name.
+          items:
+            $ref: "#/components/schemas/ScheduleTable"
+        created_by:
+          $ref: "#/components/schemas/UserRef"
+        cancelled_at:
+          type: [string, "null"]
+          format: date-time
+        cancelled_by:
+          oneOf:
+            - $ref: "#/components/schemas/UserRef"
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ScheduleList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Schedule"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    ScheduleInput:
+      type: object
+      required: [title, start_at, end_at, table_ids]
+      properties:
+        title:
+          type: string
+          maxLength: 100
+        start_at:
+          type: string
+          format: date-time
+        end_at:
+          type: string
+          format: date-time
+        table_ids:
+          type: array
+          maxItems: 500
+          items:
+            type: string
+        confirm_overlap:
+          type: boolean
+          description: Saves the schedule though another has some of its tables out at the same time.
+    Floor:
+      type: object
+      required: [areas]
+      properties:
+        areas:
+          type: array
+          description: The outlet's areas that hold tables, in order.
+          items:
+            $ref: "#/components/schemas/FloorArea"
+    FloorArea:
+      type: object
+      required: [area_id, name, decorations, tables]
+      properties:
+        area_id:
+          type: string
+        name:
+          type: string
+        decorations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Decoration"
+        tables:
+          type: array
+          description: By name, placed or not.
+          items:
+            $ref: "#/components/schemas/FloorTable"
+    FloorTable:
+      type: object
+      required: [table_id, name, capacity, shape, box, rotation, status, seated]
+      properties:
+        table_id:
+          type: string
+        name:
+          type: string
+        capacity:
+          type: [integer, "null"]
+        shape:
+          $ref: "#/components/schemas/TableShape"
+        box:
+          description: Its place on its area's layout; null while it isn't placed.
+          oneOf:
+            - $ref: "#/components/schemas/Box"
+            - type: "null"
+        rotation:
+          $ref: "#/components/schemas/Rotation"
+        status:
+          $ref: "#/components/schemas/TableStatus"
+        seated:
+          oneOf:
+            - $ref: "#/components/schemas/Seated"
+            - type: "null"
+    UpdateMeRequest:
+      type: object
+      required: [locale]
+      properties:
+        locale:
+          type: [string, "null"]
+          enum: [id, en, null]
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+          format: password
+        new_password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+    ForgotPasswordRequest:
+      type: object
+      required: [login]
+      properties:
+        login:
+          type: string
+          description: Username or email address.
+    ResetPasswordRequest:
+      type: object
+      required: [token, new_password]
+      properties:
+        token:
+          type: string
+        new_password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+    TokenRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+    ChangeEmailRequest:
+      type: object
+      required: [email, current_password]
+      properties:
+        email:
+          type: string
+          format: email
+        current_password:
+          type: string
+          format: password
+
+security:
+  - accessToken: []

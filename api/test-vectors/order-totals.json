@@ -1,0 +1,260 @@
+{
+  "description": "An order's totals, which the server, the web cashier and the Android cashier all compute: the subtotal is the lines' price \u00d7 qty; the discount comes off it; the service charge is service_bps / 10000 of what is left, and the tax tax_bps / 10000 of that plus the service, each rounded to the nearest rupiah, half up; the total adds them up. Amounts are whole rupiah.",
+  "cases": [
+    {
+      "name": "no charges",
+      "lines": [
+        {
+          "price": 18000,
+          "qty": 2
+        }
+      ],
+      "discount": 0,
+      "service_bps": 0,
+      "tax_bps": 0,
+      "expected": {
+        "subtotal": 36000,
+        "discount": 0,
+        "service": 0,
+        "tax": 0,
+        "total": 36000
+      }
+    },
+    {
+      "name": "service 5% and tax 10%: the tax is on the service too",
+      "lines": [
+        {
+          "price": 100000,
+          "qty": 1
+        }
+      ],
+      "discount": 0,
+      "service_bps": 500,
+      "tax_bps": 1000,
+      "expected": {
+        "subtotal": 100000,
+        "discount": 0,
+        "service": 5000,
+        "tax": 10500,
+        "total": 115500
+      }
+    },
+    {
+      "name": "tax alone",
+      "lines": [
+        {
+          "price": 18000,
+          "qty": 1
+        }
+      ],
+      "discount": 0,
+      "service_bps": 0,
+      "tax_bps": 1100,
+      "expected": {
+        "subtotal": 18000,
+        "discount": 0,
+        "service": 0,
+        "tax": 1980,
+        "total": 19980
+      }
+    },
+    {
+      "name": "service alone, with two decimals",
+      "lines": [
+        {
+          "price": 25000,
+          "qty": 1
+        }
+      ],
+      "discount": 0,
+      "service_bps": 550,
+      "tax_bps": 0,
+      "expected": {
+        "subtotal": 25000,
+        "discount": 0,
+        "service": 1375,
+        "tax": 0,
+        "total": 26375
+      }
+    },
+    {
+      "name": "half a rupiah of service rounds up",
+      "lines": [
+        {
+          "price": 10005,
+          "qty": 1
+        }
+      ],
+      "discount": 0,
+      "service_bps": 1000,
+      "tax_bps": 0,
+      "expected": {
+        "subtotal": 10005,
+        "discount": 0,
+        "service": 1001,
+        "tax": 0,
+        "total": 11006
+      }
+    },
+    {
+      "name": "less than half rounds down",
+      "lines": [
+        {
+          "price": 10004,
+          "qty": 1
+        }
+      ],
+      "discount": 0,
+      "service_bps": 1000,
+      "tax_bps": 0,
+      "expected": {
+        "subtotal": 10004,
+        "discount": 0,
+        "service": 1000,
+        "tax": 0,
+        "total": 11004
+      }
+    },
+    {
+      "name": "half a rupiah of tax rounds up",
+      "lines": [
+        {
+          "price": 105,
+          "qty": 1
+        }
+      ],
+      "discount": 0,
+      "service_bps": 0,
+      "tax_bps": 1000,
+      "expected": {
+        "subtotal": 105,
+        "discount": 0,
+        "service": 0,
+        "tax": 11,
+        "total": 116
+      }
+    },
+    {
+      "name": "service and tax each rounded",
+      "lines": [
+        {
+          "price": 12345,
+          "qty": 1
+        }
+      ],
+      "discount": 0,
+      "service_bps": 500,
+      "tax_bps": 1000,
+      "expected": {
+        "subtotal": 12345,
+        "discount": 0,
+        "service": 617,
+        "tax": 1296,
+        "total": 14258
+      }
+    },
+    {
+      "name": "several lines",
+      "lines": [
+        {
+          "price": 18000,
+          "qty": 2
+        },
+        {
+          "price": 25000,
+          "qty": 1
+        },
+        {
+          "price": 0,
+          "qty": 3
+        }
+      ],
+      "discount": 0,
+      "service_bps": 500,
+      "tax_bps": 1100,
+      "expected": {
+        "subtotal": 61000,
+        "discount": 0,
+        "service": 3050,
+        "tax": 7046,
+        "total": 71096
+      }
+    },
+    {
+      "name": "a discount comes off before service and tax",
+      "lines": [
+        {
+          "price": 100000,
+          "qty": 1
+        }
+      ],
+      "discount": 20000,
+      "service_bps": 500,
+      "tax_bps": 1000,
+      "expected": {
+        "subtotal": 100000,
+        "discount": 20000,
+        "service": 4000,
+        "tax": 8400,
+        "total": 92400
+      }
+    },
+    {
+      "name": "a discount of everything",
+      "lines": [
+        {
+          "price": 50000,
+          "qty": 1
+        }
+      ],
+      "discount": 50000,
+      "service_bps": 500,
+      "tax_bps": 1000,
+      "expected": {
+        "subtotal": 50000,
+        "discount": 50000,
+        "service": 0,
+        "tax": 0,
+        "total": 0
+      }
+    },
+    {
+      "name": "rates with basis-point precision",
+      "lines": [
+        {
+          "price": 10001,
+          "qty": 1
+        }
+      ],
+      "discount": 0,
+      "service_bps": 275,
+      "tax_bps": 1150,
+      "expected": {
+        "subtotal": 10001,
+        "discount": 0,
+        "service": 275,
+        "tax": 1182,
+        "total": 11458
+      }
+    },
+    {
+      "name": "the largest order, at the highest rates",
+      "lines": [
+        {
+          "price": 100000000,
+          "qty": 10
+        }
+      ],
+      "discount": 0,
+      "service_bps": 10000,
+      "tax_bps": 10000,
+      "expected": {
+        "subtotal": 1000000000,
+        "discount": 0,
+        "service": 1000000000,
+        "tax": 2000000000,
+        "total": 4000000000
+      }
+    }
+  ]
+}

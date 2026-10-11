@@ -1,0 +1,29 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+  exclusions:
+    rules:
+      # Test fixtures sign in with made-up passwords; G101 would flag every
+      # one of them as a hardcoded credential.
+      - path: _test\.go
+        linters: [gosec]
+        text: G101
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  # Report every finding instead of the first three of each kind.
+  max-issues-per-linter: 0
+  max-same-issues: 0

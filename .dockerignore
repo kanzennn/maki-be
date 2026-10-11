@@ -1,0 +1,13 @@
+# Only what the binaries are built from goes into the image's build: the
+# code, the embedded migrations, locales and mail templates. Never a .env.
+.git/
+.github/
+.idea/
+.env*
+bin/
+tmp/
+docs/
+deploy/
+api/
+*.out
+coverage.html

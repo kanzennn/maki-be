@@ -1,0 +1,4 @@
+# Text with LF endings in the repository, whatever the checkout's platform:
+# the scripts and the Caddyfile run on Linux, where CRLF breaks them.
+* text=auto eol=lf
+*.png binary

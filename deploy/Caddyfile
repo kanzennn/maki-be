@@ -1,0 +1,44 @@
+# One domain for the web app and the API, as maki-fe expects (its
+# VITE_API_ORIGIN is empty): the API's paths go to the api, everything else
+# is the web app's files, its client-side routes falling back to index.html.
+# Caddy gets and renews the domain's certificate itself.
+#
+# The web app's headers live here, not in maki-fe (React + Vite standard §9);
+# maki-fe's docs/security.md records them, and why style-src takes inline
+# styles (Radix's dialogs). CDN_ORIGIN and STORAGE_ORIGIN are the object
+# storage's, empty until menu photos come.
+
+{$MAKI_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: {$CDN_ORIGIN} {$STORAGE_ORIGIN}; font-src 'self'; connect-src 'self' {$STORAGE_ORIGIN}; worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
+		-Server
+	}
+
+	@api path /api/* /healthz /readyz
+	handle @api {
+		reverse_proxy api:8080
+	}
+
+	# Built files carry their hash in their names: kept for good, and one
+	# that isn't there is a 404, never index.html in its place.
+	handle /assets/* {
+		root * /srv/web/current
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	# The rest, index.html first, is asked for again, so a deploy shows at
+	# once; a client-side route is index.html.
+	handle {
+		root * /srv/web/current
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}

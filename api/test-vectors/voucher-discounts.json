@@ -1,0 +1,229 @@
+{
+  "description": "A voucher's discount on an order's subtotal, before the service charge and the tax, which the server, the web cashier and the Android cashier all work out. A voucher with a min_spend applies only to a subtotal of at least that much; otherwise it gives nothing. percent: value is basis points of the subtotal (1000 is 10%), rounded to the nearest rupiah, half up, then at most max_discount. amount: value is rupiah. Either way the discount is never more than the subtotal. Amounts are whole rupiah.",
+  "cases": [
+    {
+      "name": "10% under its cap",
+      "voucher": {
+        "type": "percent",
+        "value": 1000,
+        "max_discount": 25000,
+        "min_spend": null
+      },
+      "subtotal": 100000,
+      "expected": {
+        "applies": true,
+        "discount": 10000
+      }
+    },
+    {
+      "name": "10% at its cap",
+      "voucher": {
+        "type": "percent",
+        "value": 1000,
+        "max_discount": 25000,
+        "min_spend": null
+      },
+      "subtotal": 300000,
+      "expected": {
+        "applies": true,
+        "discount": 25000
+      }
+    },
+    {
+      "name": "a percentage without a cap",
+      "voucher": {
+        "type": "percent",
+        "value": 1000,
+        "max_discount": null,
+        "min_spend": null
+      },
+      "subtotal": 300000,
+      "expected": {
+        "applies": true,
+        "discount": 30000
+      }
+    },
+    {
+      "name": "half a rupiah rounds up",
+      "voucher": {
+        "type": "percent",
+        "value": 1250,
+        "max_discount": null,
+        "min_spend": null
+      },
+      "subtotal": 10004,
+      "expected": {
+        "applies": true,
+        "discount": 1251
+      }
+    },
+    {
+      "name": "less than half rounds down",
+      "voucher": {
+        "type": "percent",
+        "value": 1250,
+        "max_discount": null,
+        "min_spend": null
+      },
+      "subtotal": 10003,
+      "expected": {
+        "applies": true,
+        "discount": 1250
+      }
+    },
+    {
+      "name": "a percentage with two decimals",
+      "voucher": {
+        "type": "percent",
+        "value": 750,
+        "max_discount": null,
+        "min_spend": null
+      },
+      "subtotal": 33333,
+      "expected": {
+        "applies": true,
+        "discount": 2500
+      }
+    },
+    {
+      "name": "100% is the whole subtotal",
+      "voucher": {
+        "type": "percent",
+        "value": 10000,
+        "max_discount": null,
+        "min_spend": null
+      },
+      "subtotal": 45000,
+      "expected": {
+        "applies": true,
+        "discount": 45000
+      }
+    },
+    {
+      "name": "a cap past the subtotal",
+      "voucher": {
+        "type": "percent",
+        "value": 10000,
+        "max_discount": 1000000,
+        "min_spend": null
+      },
+      "subtotal": 45000,
+      "expected": {
+        "applies": true,
+        "discount": 45000
+      }
+    },
+    {
+      "name": "an amount",
+      "voucher": {
+        "type": "amount",
+        "value": 10000,
+        "max_discount": null,
+        "min_spend": null
+      },
+      "subtotal": 45000,
+      "expected": {
+        "applies": true,
+        "discount": 10000
+      }
+    },
+    {
+      "name": "an amount past the subtotal is the whole subtotal",
+      "voucher": {
+        "type": "amount",
+        "value": 50000,
+        "max_discount": null,
+        "min_spend": null
+      },
+      "subtotal": 45000,
+      "expected": {
+        "applies": true,
+        "discount": 45000
+      }
+    },
+    {
+      "name": "a minimum spend met exactly",
+      "voucher": {
+        "type": "amount",
+        "value": 10000,
+        "max_discount": null,
+        "min_spend": 50000
+      },
+      "subtotal": 50000,
+      "expected": {
+        "applies": true,
+        "discount": 10000
+      }
+    },
+    {
+      "name": "a minimum spend not met",
+      "voucher": {
+        "type": "amount",
+        "value": 10000,
+        "max_discount": null,
+        "min_spend": 50000
+      },
+      "subtotal": 49999,
+      "expected": {
+        "applies": false,
+        "discount": 0
+      }
+    },
+    {
+      "name": "a percentage with a minimum spend",
+      "voucher": {
+        "type": "percent",
+        "value": 1000,
+        "max_discount": 25000,
+        "min_spend": 100000
+      },
+      "subtotal": 150000,
+      "expected": {
+        "applies": true,
+        "discount": 15000
+      }
+    },
+    {
+      "name": "a little rounds to nothing",
+      "voucher": {
+        "type": "percent",
+        "value": 100,
+        "max_discount": null,
+        "min_spend": null
+      },
+      "subtotal": 40,
+      "expected": {
+        "applies": true,
+        "discount": 0
+      }
+    },
+    {
+      "name": "nothing to discount",
+      "voucher": {
+        "type": "percent",
+        "value": 1000,
+        "max_discount": null,
+        "min_spend": null
+      },
+      "subtotal": 0,
+      "expected": {
+        "applies": true,
+        "discount": 0
+      }
+    },
+    {
+      "name": "the largest order, all of it",
+      "voucher": {
+        "type": "percent",
+        "value": 10000,
+        "max_discount": null,
+        "min_spend": null
+      },
+      "subtotal": 1000000000,
+      "expected": {
+        "applies": true,
+        "discount": 1000000000
+      }
+    }
+  ]
+}

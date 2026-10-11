@@ -1,0 +1,21 @@
+# Local environment; .env.example is the committed template
+.env*
+!.env.example
+
+# Build output and live-reload binaries
+/bin/
+/tmp/
+
+# Test coverage
+*.out
+coverage.html
+
+# IDE settings
+.idea/
+
+# The stack's files a local run of deploy/ makes; on the VPS they live in
+# /srv/maki, never in a repository
+/deploy/release.env
+/deploy/backup.env
+/deploy/web/
+/deploy/backups/
