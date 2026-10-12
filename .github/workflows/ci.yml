@@ -61,7 +61,10 @@ jobs:
         with:
           go-version-file: go.mod
       - name: go test
-        run: go test ./...
+        # -count=1: setup-go restores Go's cache, test results included, and
+        # a cached result stands in for a run while the code is unchanged;
+        # the integration tests would then never reach this database.
+        run: go test -count=1 ./...
 
   image:
     needs: [lint, test]
