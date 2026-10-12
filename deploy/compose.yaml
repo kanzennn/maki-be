@@ -1,37 +1,41 @@
-# The production stack on the VPS (spec, Infra & deploy): Caddy in front,
-# serving the web app's files and passing the API to the api; the api and
-# the worker from the same maki-be image; and PostgreSQL. It lives in
-# /srv/maki beside its .env, and deploy.sh runs it: see docs/deployment.md.
+# The production stack on the VPS (spec, Infra & deploy): Caddy, serving the
+# web app's files and passing the API to the api, behind the host's Nginx,
+# which holds ports 80 and 443 and the certificate; and the api and the
+# worker from the same maki-be image, on the server's shared PostgreSQL 18.
+# It lives in /srv/maki beside its .env, and deploy.sh runs it: see
+# docs/deployment.md.
 #
 # The image comes from release.env, which deploy.sh writes; the secrets and
-# settings from .env, which stays on the server only.
+# settings from .env, and the database's from the shared PostgreSQL's own
+# file for this app (MAKI_DB_ENV_FILE); both stay on the server only.
 name: maki
 
 x-backend: &backend
   image: ${MAKI_BE_IMAGE:?deploy.sh sets it in release.env}
   restart: unless-stopped
-  env_file: .env
+  env_file:
+    - .env
+    # DB_HOST, DB_PORT, DB_DATABASE, DB_USERNAME, DB_PASSWORD: the config
+    # makes the database's URL from them.
+    - ${MAKI_DB_ENV_FILE:?set in .env}
   environment: &backend-env
     APP_ENV: production
-    DATABASE_URL: postgres://maki:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/maki?sslmode=disable
     WEB_BASE_URL: https://${MAKI_DOMAIN:?set in .env}
-    # Only Caddy reaches the api: its port is published nowhere, so the
-    # X-Forwarded-For of anything on the stack's private network is Caddy's.
+    # Caddy reaches the api over the stack's network, and the shared
+    # database's other clients could over db-net: X-Forwarded-For is taken
+    # from private addresses only, none of them the internet's.
     TRUSTED_PROXIES: 172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
-  depends_on:
-    postgres:
-      condition: service_healthy
+  networks: [default, db-net]
 
 services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      # The host's loopback only: the host's Nginx, which holds 80 and 443
+      # and the certificate, passes the domain on to here.
+      - "127.0.0.1:${MAKI_HTTP_PORT:?set in .env}:80"
     environment:
-      MAKI_DOMAIN: ${MAKI_DOMAIN:?set in .env}
       CDN_ORIGIN: ${CDN_ORIGIN:-}
       STORAGE_ORIGIN: ${STORAGE_ORIGIN:-}
     volumes:
@@ -54,26 +58,22 @@ services:
     <<: *backend
     command: ["worker"]
 
-  postgres:
-    # The production major version, which CI tests against (standard §12).
+  # pg_dump and pg_restore for backup.sh and the restore
+  # (docs/deployment.md): the shared server's major version, on its network,
+  # with this app's DB_ variables. Only ever run with `compose run`.
+  pg:
     image: postgres:18
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: maki
-      POSTGRES_DB: maki
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
-    volumes:
-      # From 18 the image keeps its data in /var/lib/postgresql/18/docker:
-      # the volume goes on /var/lib/postgresql, not on the old .../data,
-      # which would hold nothing.
-      - postgres-data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U maki -d maki"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
+    profiles: [tools]
+    env_file:
+      - ${MAKI_DB_ENV_FILE:?set in .env}
+    networks: [db-net]
+
+networks:
+  # The server's shared PostgreSQL 18 is on it.
+  db-net:
+    external: true
+    name: ${MAKI_DB_NETWORK:-db-net}
 
 volumes:
   caddy-data:
   caddy-config:
-  postgres-data:

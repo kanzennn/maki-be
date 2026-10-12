@@ -365,8 +365,8 @@ password never appears in an entry.
 
 | Area | In maki-be |
 | --- | --- |
-| TLS | Planned at Caddy, with the API on a private port. There's no deployment yet (no Caddyfile or Dockerfile), so nothing terminates TLS today |
-| Trusted proxies | `TRUSTED_PROXIES`; empty trusts none, so `ClientIP()` (and the rate limits keyed on it) can't be spoofed |
+| TLS | At the server's own Nginx, which passes the domain to Caddy on the host's loopback only; Caddy passes the API's paths to the api, whose port is published nowhere ([deployment.md](./deployment.md)). No server runs it yet |
+| Trusted proxies | `TRUSTED_PROXIES`; empty trusts none, so `ClientIP()` (and the rate limits keyed on it) can't be spoofed. Production trusts the private ranges: Caddy, and the shared database's other clients on `db-net`, which could reach the api too; nothing from the internet is in them |
 | CORS | Exact origins from `CORS_ALLOWED_ORIGINS`, with credentials. A request whose `Origin` host equals its `Host` is same-origin and skips the list, so the web app served from the API's own host works (Caddy and the Vite proxy pass `Host` through) |
 | Body size | 1 MB (`http.MaxBytesReader`), 413 past it |
 | Response headers | `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`. A 401 for a missing or bad access token carries `WWW-Authenticate: Bearer realm="maki"` |
@@ -382,8 +382,9 @@ password never appears in an entry.
 - Two-factor authentication (Next Dev in the spec).
 - A breached-password check.
 - A shared rate-limit store, needed before a second API instance.
-- The deployment: Caddy with TLS in front of the API, the Docker images, and
-  `TRUSTED_PROXIES` set to Caddy's address.
+- The deployment, live: the server's Nginx with TLS and Caddy in front of the
+  API, the Docker image, and `TRUSTED_PROXIES` as above are in `deploy/`,
+  but no server runs them yet.
 
 Re-audit when any of these lands, and when a payment integration, a webhook
 receiver or a new kind of upload does (standard §11).

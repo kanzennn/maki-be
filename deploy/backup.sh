@@ -18,8 +18,12 @@ bucket="$(setting BACKUP_BUCKET)"
 
 mkdir -p backups
 file="maki-$(date -u +%Y%m%dT%H%M%SZ).dump"
-docker compose --env-file .env --env-file release.env exec -T postgres \
-  pg_dump -U maki -d maki --format=custom > "backups/$file.part"
+# pg_dump from the stack's pg service (compose.yaml), on the shared server's
+# network, with this app's DB_ variables, which the single quotes leave to
+# the container's shell.
+docker compose --env-file .env --env-file release.env run --rm -T pg sh -c \
+  'PGPASSWORD="$DB_PASSWORD" PGSSLMODE="${DB_SSLMODE:-prefer}" exec pg_dump -w -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "$DB_USERNAME" -d "$DB_DATABASE" --format=custom' \
+  > "backups/$file.part"
 mv "backups/$file.part" "backups/$file"
 
 docker run --rm --env-file backup.env -v "$(pwd)/backups:/backups:ro" amazon/aws-cli \

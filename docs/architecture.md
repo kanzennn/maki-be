@@ -211,7 +211,8 @@ language of the request's `Accept-Language` header, with the error's
 | --- | --- | --- |
 | `APP_ENV` | `production` | `development` or `production`; anything but development runs Gin in release mode |
 | `HTTP_ADDR` | `:8080` | |
-| `DATABASE_URL` | — | Required |
+| `DATABASE_URL` | — | Required, unless the `DB_` variables below are set; it wins over them |
+| `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `DB_SSLMODE` | `DB_PORT` `5432`; `DB_SSLMODE` pgx's own (`prefer`) | Without `DATABASE_URL`, its URL is made from them, each part escaped: how a shared PostgreSQL server's env file for an app names them (Laravel's names), and how production gets its database. Host, database and user are required together |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `CORS_ALLOWED_ORIGINS` | empty | Comma-separated exact origins; `*` and paths are rejected |
 | `TRUSTED_PROXIES` | empty | IPs or CIDRs whose `X-Forwarded-For` is trusted; empty trusts none |

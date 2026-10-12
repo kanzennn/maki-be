@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/mail"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -18,8 +20,10 @@ import (
 
 // Config is the typed configuration for both binaries.
 type Config struct {
-	Env                string
-	HTTPAddr           string
+	Env      string
+	HTTPAddr string
+	// DatabaseURL is DATABASE_URL, or else the URL the DB_ variables make
+	// (databaseURLFromParts).
 	DatabaseURL        string
 	LogLevel           slog.Level
 	CORSAllowedOrigins []string
@@ -89,7 +93,12 @@ func Load() (Config, error) {
 		errs = append(errs, fmt.Errorf("APP_ENV must be development or production, got %q", cfg.Env))
 	}
 	if cfg.DatabaseURL == "" {
-		errs = append(errs, errors.New("DATABASE_URL is required"))
+		var dbErrs []error
+		cfg.DatabaseURL, dbErrs = databaseURLFromParts()
+		errs = append(errs, dbErrs...)
+		if cfg.DatabaseURL == "" && len(dbErrs) == 0 {
+			errs = append(errs, errors.New("DATABASE_URL, or DB_HOST, DB_DATABASE and DB_USERNAME, is required"))
+		}
 	}
 	if len(cfg.JWTSecret) < minJWTSecret {
 		errs = append(errs, fmt.Errorf("JWT_SECRET is required and must be at least %d bytes; generate one with: openssl rand -base64 48", minJWTSecret))
@@ -121,6 +130,53 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("invalid configuration:\n%w", err)
 	}
 	return cfg, nil
+}
+
+// sslModes are the sslmode values libpq, and so pgx, takes.
+var sslModes = []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+
+// databaseURLFromParts makes the database's URL from the variables a shared
+// PostgreSQL server hands each of its apps in an env file, by Laravel's
+// names: DB_HOST, DB_PORT (5432 when empty), DB_DATABASE, DB_USERNAME,
+// DB_PASSWORD, and DB_SSLMODE (pgx's own default, prefer, when empty). Each
+// part is escaped in the URL, so a password needs no care. It returns ""
+// when none of host, database and user is set.
+func databaseURLFromParts() (string, []error) {
+	host, name, user := os.Getenv("DB_HOST"), os.Getenv("DB_DATABASE"), os.Getenv("DB_USERNAME")
+	port, password, sslmode := getOr("DB_PORT", "5432"), os.Getenv("DB_PASSWORD"), os.Getenv("DB_SSLMODE")
+	if host == "" && name == "" && user == "" {
+		return "", nil
+	}
+
+	var errs []error
+	for _, part := range [][2]string{{"DB_HOST", host}, {"DB_DATABASE", name}, {"DB_USERNAME", user}} {
+		if part[1] == "" {
+			errs = append(errs, fmt.Errorf("%s is required with the other DB_ variables, when DATABASE_URL isn't set", part[0]))
+		}
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		errs = append(errs, fmt.Errorf("DB_PORT must be a port number, got %q", port))
+	}
+	if sslmode != "" && !slices.Contains(sslModes, sslmode) {
+		errs = append(errs, fmt.Errorf("DB_SSLMODE must be one of %s, got %q", strings.Join(sslModes, ", "), sslmode))
+	}
+	if len(errs) > 0 {
+		return "", errs
+	}
+
+	u := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(user, password),
+		Host:   net.JoinHostPort(host, port),
+		Path:   "/" + name,
+	}
+	if password == "" {
+		u.User = url.User(user)
+	}
+	if sslmode != "" {
+		u.RawQuery = url.Values{"sslmode": {sslmode}}.Encode()
+	}
+	return u.String(), nil
 }
 
 func loadSMTP(development bool) (SMTP, []error) {

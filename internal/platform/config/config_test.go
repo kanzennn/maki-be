@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const testSecret = "0123456789abcdef0123456789abcdef"
@@ -18,6 +20,7 @@ func setEnv(t *testing.T, vars map[string]string) {
 	defaults := map[string]string{"JWT_SECRET": testSecret, "WEB_BASE_URL": "https://admin.maki.test"}
 	for _, key := range []string{
 		"APP_ENV", "HTTP_ADDR", "DATABASE_URL", "LOG_LEVEL", "CORS_ALLOWED_ORIGINS", "TRUSTED_PROXIES",
+		"DB_HOST", "DB_PORT", "DB_DATABASE", "DB_USERNAME", "DB_PASSWORD", "DB_SSLMODE",
 		"JWT_SECRET", "WEB_BASE_URL",
 		"SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM",
 	} {
@@ -121,6 +124,92 @@ func TestLoadReportsEveryProblem(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %s", err, want)
 		}
+	}
+}
+
+// A shared PostgreSQL server's env file, as production gets it: pgx must
+// read back exactly the parts, the password's every character included.
+func TestLoadDatabaseFromParts(t *testing.T) {
+	const password = `p@ss:w/rd?#%&+ é"`
+	setEnv(t, map[string]string{
+		"DB_HOST":     "postgresql-18",
+		"DB_PORT":     "5433",
+		"DB_DATABASE": "maki",
+		"DB_USERNAME": "maki",
+		"DB_PASSWORD": password,
+		"DB_SSLMODE":  "disable",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	pg, err := pgconn.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		t.Fatalf("pgx can't read the URL: %v", err)
+	}
+	if pg.Host != "postgresql-18" || pg.Port != 5433 || pg.Database != "maki" || pg.User != "maki" {
+		t.Errorf("pgx reads %s:%d, database %q, user %q", pg.Host, pg.Port, pg.Database, pg.User)
+	}
+	if pg.Password != password {
+		t.Errorf("pgx reads a different password from %q", cfg.DatabaseURL)
+	}
+	if pg.TLSConfig != nil {
+		t.Errorf("DB_SSLMODE=disable, yet pgx would use TLS")
+	}
+}
+
+func TestLoadDatabaseFromPartsDefaults(t *testing.T) {
+	setEnv(t, map[string]string{"DB_HOST": "db", "DB_DATABASE": "maki", "DB_USERNAME": "maki"})
+
+	cfg, err := Load()
+	if err != nil || cfg.DatabaseURL != "postgres://maki@db:5432/maki" {
+		t.Errorf("Load() = %q, %v; want port 5432, no password and pgx's own sslmode", cfg.DatabaseURL, err)
+	}
+}
+
+func TestLoadDatabaseURLWinsOverParts(t *testing.T) {
+	setEnv(t, map[string]string{
+		"DATABASE_URL": "postgres://localhost/maki",
+		"DB_HOST":      "db",
+		"DB_DATABASE":  "other",
+		"DB_USERNAME":  "other",
+	})
+
+	cfg, err := Load()
+	if err != nil || cfg.DatabaseURL != "postgres://localhost/maki" {
+		t.Errorf("Load() = %q, %v; want DATABASE_URL as it is", cfg.DatabaseURL, err)
+	}
+}
+
+func TestLoadRejectsBadDatabaseParts(t *testing.T) {
+	whole := map[string]string{"DB_HOST": "db", "DB_DATABASE": "maki", "DB_USERNAME": "maki"}
+	with := func(key, value string) map[string]string {
+		vars := maps.Clone(whole)
+		vars[key] = value
+		return vars
+	}
+	for _, tc := range []struct {
+		name string
+		vars map[string]string
+		want []string
+	}{
+		{"host alone", map[string]string{"DB_HOST": "db", "DB_PASSWORD": "secret"}, []string{"DB_DATABASE is required", "DB_USERNAME is required"}},
+		{"no host", with("DB_HOST", ""), []string{"DB_HOST is required"}},
+		{"port", with("DB_PORT", "fifty"), []string{"DB_PORT"}},
+		{"port zero", with("DB_PORT", "0"), []string{"DB_PORT"}},
+		{"port out of range", with("DB_PORT", "65536"), []string{"DB_PORT"}},
+		{"sslmode", with("DB_SSLMODE", "on"), []string{"DB_SSLMODE"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, tc.vars)
+			_, err := Load()
+			for _, want := range tc.want {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("Load() error = %v, want one naming %s", err, want)
+				}
+			}
+		})
 	}
 }
 

@@ -1,14 +1,24 @@
 # One domain for the web app and the API, as maki-fe expects (its
 # VITE_API_ORIGIN is empty): the API's paths go to the api, everything else
 # is the web app's files, its client-side routes falling back to index.html.
-# Caddy gets and renews the domain's certificate itself.
+# The host's Nginx holds the domain's certificate and passes the domain on:
+# Caddy speaks plain HTTP, on the host's loopback only (compose.yaml).
 #
 # The web app's headers live here, not in maki-fe (React + Vite standard §9);
 # maki-fe's docs/security.md records them, and why style-src takes inline
 # styles (Radix's dialogs). CDN_ORIGIN and STORAGE_ORIGIN are the object
 # storage's, empty until menu photos come.
 
-{$MAKI_DOMAIN} {
+{
+	auto_https off
+	servers {
+		# Nginx's X-Forwarded-For and X-Forwarded-Proto are kept. It comes in
+		# through Docker's gateway, a private address, and nothing else can.
+		trusted_proxies static private_ranges
+	}
+}
+
+:80 {
 	encode zstd gzip
 
 	header {
