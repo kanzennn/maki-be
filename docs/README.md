@@ -58,9 +58,11 @@ project-specific to put in them.
   change; point the IDE's Go SDK at that toolchain.
 - **PostgreSQL in development.** There is no compose file: development uses
   the PostgreSQL 16 server that already runs in Docker on the development
-  machine, with its own `maki` database. Production runs PostgreSQL 16 too,
-  so nothing that needs a newer major version (such as `uuidv7()` or
-  `JSON_TABLE`) goes into the schema.
+  machine, with its own `maki` database. Production and CI run PostgreSQL 18
+  (chosen before launch: supported until November 2030, data checksums on
+  from the start); while development stays on 16, nothing that needs 17 or
+  18 (such as `JSON_TABLE` or `uuidv7()`) goes into the schema or the
+  queries.
 - **Object storage in development.** There is no local S3 server. Uploads in
   development go to a pair of dev buckets at IDCloudHost, separate from
   production and with their own access key, so they need internet access.
@@ -71,8 +73,8 @@ project-specific to put in them.
   a PostgreSQL container per test run with testcontainers. This project
   already has a PostgreSQL 16 server in Docker, so each integration test
   gets a throwaway schema in it instead (`TEST_DATABASE_URL`, normally the
-  `maki` database). CI will run the same tests against a PostgreSQL 16
-  service container.
+  `maki` database). CI runs the same tests against a PostgreSQL 18 service
+  container, production's version.
 - **Access first, business modules next.** The platform is in place (health
   probes, migrations with `api migrate`, the outbox and its worker, CUID2
   IDs), and so are sign-in, sessions, password and email flows, the Log

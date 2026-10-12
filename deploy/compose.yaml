@@ -56,14 +56,17 @@ services:
 
   postgres:
     # The production major version, which CI tests against (standard §12).
-    image: postgres:16
+    image: postgres:18
     restart: unless-stopped
     environment:
       POSTGRES_USER: maki
       POSTGRES_DB: maki
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # From 18 the image keeps its data in /var/lib/postgresql/18/docker:
+      # the volume goes on /var/lib/postgresql, not on the old .../data,
+      # which would hold nothing.
+      - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U maki -d maki"]
       interval: 5s

@@ -13,7 +13,7 @@ One VPS runs one Docker Compose stack, `maki`, in `/srv/maki`:
 | `caddy` | TLS for the domain (its certificate, renewed by Caddy), the web app's files, and the API's paths passed to the api | `caddy:2-alpine`, [`deploy/Caddyfile`](../deploy/Caddyfile) |
 | `api` | `api`, on `:8080` inside the stack only | the maki-be image |
 | `worker` | `worker`: the outbox's jobs (emails) | the maki-be image |
-| `postgres` | PostgreSQL 16, its data in the `postgres-data` volume, published nowhere | `postgres:16` |
+| `postgres` | PostgreSQL 18, its data in the `postgres-data` volume (on `/var/lib/postgresql`, where the 18 image keeps it), published nowhere | `postgres:18` |
 
 The web app and the API share one domain, as maki-fe expects
 (`VITE_API_ORIGIN` empty): `/api/*`, `/healthz` and `/readyz` go to the api,
@@ -56,7 +56,7 @@ the repository:
 | Job | When | What |
 | --- | --- | --- |
 | `lint` | every push and pull request | `go vet`, golangci-lint (the Makefile's version), and `sqlc diff`: the store code is what sqlc makes of the queries |
-| `test` | every push and pull request | `go test ./...` against a PostgreSQL 16 service, `TEST_DATABASE_URL` set; with `CI` set, the integration tests fail rather than skip without it (standard §12) |
+| `test` | every push and pull request | `go test ./...` against a PostgreSQL 18 service, production's version, `TEST_DATABASE_URL` set; with `CI` set, the integration tests fail rather than skip without it (standard §12) |
 | `image` | a push to `main`, both passing | builds the image, pushes it to GHCR |
 | `deploy` | after `image`, when the repository variable `DEPLOY_ENABLED` is `true` | through the `production` environment: copies the stack's files to `/srv/maki`, logs the server into GHCR with the job's own token (through stdin, logged out after), and runs `deploy.sh` with the new image |
 

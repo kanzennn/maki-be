@@ -43,7 +43,7 @@ jobs:
       # The production major version (Go + Gin standard §12). Each test makes
       # its own schema in it.
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_USER: maki
           POSTGRES_PASSWORD: maki
