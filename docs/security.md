@@ -2,10 +2,11 @@
 
 How maki-be applies §7 (authentication and authorization) and §11 (security
 baseline) of the [Go + Gin standard](../../../docs/gin-architecture-standard.md),
-as the code does it today. The sign-in flows live in `internal/auth`,
-permissions and the rules for managing accounts in `internal/user`; the
-building blocks in `internal/platform/authn`, `password`, `ratelimit` and
-`middleware`.
+as the code does it today. The sign-in flows are `AuthService`'s
+(`internal/services/auth_service.go`), permissions and the rules for
+managing accounts the user, role and staff services'; the building blocks
+are in `internal/utils` (`jwt`, `cookie`, `password`, `ratelimit`) and
+`internal/middlewares`.
 
 ## Accounts
 
@@ -52,7 +53,7 @@ A session is a family of refresh tokens: signing in starts one, and
 | Access | HS256 JWT: `sub` (user), `sid` (session), `iss=maki`, `aud=maki-api`, `iat`, `exp` | 15 minutes | Not at all: only the signing key |
 | Refresh | 256 random bits, base64url | 30 days from issue. Each refresh issues a new one, so a session used once a month never expires | SHA-256 of it, never the token |
 
-- **Every request loads the principal.** `middleware.Authenticate` verifies
+- **Every request loads the principal.** `middlewares.Authenticate` verifies
   the token: HS256 only, and issuer, audience, issue time and expiry all
   checked. Then it asks the database whether the user is active and the
   session still has a current token. A revoked session or a deactivated
@@ -97,10 +98,10 @@ The clients' side:
 ## Permissions
 
 RBAC with permissions, as the spec lays out: two fixed roles and custom roles
-per outlet. The user module owns it (`internal/user`); the checks are
-middleware in `internal/platform/middleware/access.go`.
+per outlet. Roles are `RoleService`'s; the checks are middleware in
+`internal/middlewares/access.go`.
 
-**The catalog** (`internal/user/permissions.go`, `GET /permissions`) is 14
+**The catalog** (`models.PermissionCatalog`, `GET /permissions`) is 14
 codes in 8 groups, from `dashboard.view` to `log.view`. Codes are stable:
 roles store them and routes name them. A code a role holds but the catalog
 no longer has is ignored.
@@ -186,7 +187,7 @@ checking the scope is a 500, not a 404.
   deleted: 409 `role_in_use` lists who holds it.
 
 **Sessions end at once** — in the same transaction, through
-`auth.Sessions.EndAll` — when an account is deactivated, deleted, promoted
+`SessionRepository.RevokeUserSessions` — when an account is deactivated, deleted, promoted
 or demoted, or its password reset by someone else. A changed role doesn't
 end them: the new permissions apply from the next request.
 
@@ -219,7 +220,7 @@ from anywhere else, and a revoked till stops at once.
     `/api/v1`; 400 days, the longest a browser keeps one, sent again each
     time the cashier opens (`GET …/pos/device`), so a till in use keeps it.
   - The Android app gets it in the body, once, for its secure storage, and
-    sends it as `X-Device-Token`. `authn.DeviceToken` reads the header
+    sends it as `X-Device-Token`. `cookie.DeviceToken` reads the header
     first, then the cookie.
 - **A token alone allows nothing.** Every cashier endpoint needs the
   access token too, which a browser sends in the `Authorization` header,
@@ -257,9 +258,9 @@ from anywhere else, and a revoked till stops at once.
 A Manager's or staff member's first password is typed by whoever creates the
 account, and so is a new one when a Manager or the Owner resets it. Both set
 `users.must_change_password`, and a reset ends the user's sessions. While
-the flag is set, `middleware.RequirePasswordChanged` answers 403
+the flag is set, `middlewares.RequirePasswordChanged` answers 403
 `password_change_required` on every route except `GET /me` and
-`PUT /me/password`. Those two are the `authed` group in `cmd/api/router.go`;
+`PUT /me/password`. Those two are the `authed` group in `internal/routes`;
 everything else registers on `protected`. The web and Android apps take such
 a user straight to the change-password screen. The middleware fails closed:
 on a route wired without `Authenticate` it answers 401.
@@ -315,8 +316,8 @@ store first, or each instance allows its own share.
 
 `action_logs` is append-only: triggers refuse `UPDATE`, `DELETE` and
 `TRUNCATE` (SQLSTATE 42501). An entry is written in the same transaction as
-the change it records, with the outlet it happened in. The auth module
-records:
+the change it records, with the outlet it happened in. Signing in and the
+account's own changes record:
 
 - `auth.owner_created`, `auth.login`, `auth.logout`
 - `auth.login_failed`, with the reason for a known account. For an unknown
@@ -328,7 +329,7 @@ records:
   `auth.password_reset`
 - `auth.email_change_requested` (old and new address), `auth.email_verified`
 
-The outlet and user modules record every change, an update with only the
+The outlets, roles and staff record every change, an update with only the
 fields that changed (before and after):
 
 - `outlet.created`, `outlet.updated`, `outlet.activated`,
@@ -338,8 +339,8 @@ fields that changed (before and after):
   `user.demoted`, `user.activated`, `user.deactivated`,
   `user.password_reset`, `user.deleted`
 
-The menu module records every change the same way, and every stock
-adjustment:
+The categories and menus record every change the same way, and so does
+every stock adjustment:
 
 - `category.created`, `category.updated`, `category.activated`,
   `category.deactivated`, `category.reordered` (the order before and after),
@@ -350,7 +351,7 @@ adjustment:
 - `stock.adjusted`: the count before and after, the type, the reason and the
   note
 
-The device and order modules record:
+The devices and the cashier record:
 
 - `device.activated` (its code, name and platform), `device.revoked`
 - `order.created`: the receipt number, type, total and payment method, with
@@ -391,7 +392,9 @@ receiver or a new kind of upload does (standard §11).
 
 ## Checks done
 
-Checked on 2026-09-29, 2026-09-30 and 2026-10-01:
+Checked on 2026-09-29, 2026-09-30 and 2026-10-01, with the paths of the
+time: the integration tests have lived in `internal/tests/<resource>/`
+since the layered restructure, which kept every one of them.
 
 - **Integration tests:** 35 in `internal/auth`, against PostgreSQL. They
   cover every flow above, including refresh reuse inside and outside the

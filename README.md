@@ -50,10 +50,22 @@ deploys it to the VPS once deploys are enabled. The production stack is in
 
 ## Structure
 
+Split by layer, not by domain, with one file per resource in each layer
+(`voucher_controller.go`, `voucher_service.go`, `voucher_repository.go`):
+
 ```
 cmd/api, cmd/worker        the two binaries and their wiring
-internal/<module>/         business modules (handler → service → repository)
-internal/platform/         config, db, httpx, i18n, authn, id, mail, middleware, outbox, password, ratelimit — no business rules
+internal/routes/           the router: middleware chain, route groups, <resource>_routes.go
+internal/middlewares/      request ID, logging, recovery, the error envelope, security headers, auth, permissions, outlet scope
+internal/controllers/      bind the request, call a service, write the response
+internal/services/         the business rules and their transactions
+internal/repositories/     the queries on each resource's tables (store/: sqlc output)
+internal/validations/      request bodies and field rules
+internal/models/           entities and responses
+internal/jobs/             background jobs' handlers
+internal/config/           env, the database pool and transactions, migrations
+internal/utils/            apperror (the error catalog), response, jwt, password, i18n, mail, outbox, ratelimit, … — no business rules
+internal/tests/            integration tests per resource, and the test that keeps the layers' imports one way
 api/openapi.yaml           the API contract
 api/test-vectors/          calculations every client repeats, such as an order's totals
 migrations/, sqlc/         schema migrations and SQL queries

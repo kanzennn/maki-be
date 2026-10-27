@@ -2,7 +2,7 @@
 
 | Doc | Covers |
 | --- | --- |
-| [architecture.md](./architecture.md) | Binaries, layout, modules and their dependencies, request lifecycle and route groups, lists, errors, configuration, data access, migrations, data model, stock, the cashier, vouchers, background jobs, testing |
+| [architecture.md](./architecture.md) | Binaries, layout, layers and their dependencies, request lifecycle and route groups, lists, errors, configuration, data access, migrations, data model, stock, the cashier, vouchers, background jobs, testing |
 | [security.md](./security.md) | Accounts, passwords, sessions and tokens, permissions and outlet scope, cashier devices, temporary passwords, password reset and email changes, rate limits, the audit log, the HTTP baseline as shipped, what isn't built yet, and the checks done |
 | [deployment.md](./deployment.md) | The production stack (Caddy, api, worker, PostgreSQL on one VPS), the image, the pipeline and its deploy, setting the server and GitHub up, a deploy step by step and its rollback, the environment, backups and restore, logs and health, the pre-launch checklist |
 
@@ -16,10 +16,13 @@ project-specific to put in them.
   this project is its reference implementation.
 - The product spec is
   [`Spesifikasi Fitur POS Multi-Outlet.md`](../../Spesifikasi%20Fitur%20POS%20Multi-Outlet.md).
-- Modular monolith with two binaries (`cmd/api`, `cmd/worker`), wired by
-  hand in each `main.go`. The modules so far are auth, user, outlet, menu,
-  device, payment, voucher, order and audit; one talks to another only
-  through an interface it declares.
+- A monolith with two binaries (`cmd/api`, `cmd/worker`), wired by hand in
+  each `main.go`, and split by layer, not by domain: routes, middlewares,
+  controllers, services, repositories (with sqlc's queries), validations,
+  models, jobs, utils and config, one file per resource in each. The
+  imports go one way, which a test checks. A transaction travels on the
+  context, so the services a sale calls share it without passing a
+  `pgx.Tx`.
 - Sign-in is a username and password, hashed with argon2id. A session is a
   family of refresh tokens that rotate on every use. The 15-minute access
   token is checked against the database on every request, so ending a
@@ -75,7 +78,7 @@ project-specific to put in them.
   gets a throwaway schema in it instead (`TEST_DATABASE_URL`, normally the
   `maki` database). CI runs the same tests against a PostgreSQL 18 service
   container, production's version.
-- **Access first, business modules next.** The platform is in place (health
+- **Access first, the business next.** The platform is in place (health
   probes, migrations with `api migrate`, the outbox and its worker, CUID2
   IDs), and so are sign-in, sessions, password and email flows, the Log
   Action, outlets, permissions with roles and staff accounts, and the menu

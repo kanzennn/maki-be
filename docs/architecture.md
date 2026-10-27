@@ -8,11 +8,11 @@ This file records how this project applies it.
 
 | Binary | Role |
 | --- | --- |
-| `cmd/api` | HTTP API: the middleware chain, the probes, and every module's routes. `api migrate` applies pending migrations and exits; `api create-owner` creates the one Owner account, asking for its details |
-| `cmd/worker` | Runs background jobs from the outbox table ([below](#background-jobs-outbox)): so far the auth module's four emails |
+| `cmd/api` | HTTP API: builds the repositories, services and controllers, and serves the router of `internal/routes`. `api migrate` applies pending migrations and exits; `api create-owner` creates the one Owner account, asking for its details |
+| `cmd/worker` | Runs background jobs from the outbox table ([below](#background-jobs-outbox)): so far the four emails of signing in (`internal/jobs`) |
 
 Both load `.env` if present (without overriding real environment variables),
-parse the configuration with `internal/platform/config`, and shut down
+parse the configuration with `internal/config`, and shut down
 cleanly on Ctrl+C or SIGTERM; a second Ctrl+C kills them at once. Wiring is
 manual: each `main.go` shows the whole object graph.
 
@@ -20,103 +20,120 @@ manual: each `main.go` shows the whole object graph.
 
 ```
 cmd/
-  api/main.go          config → logger → db pool → `migrate`, `create-owner`, or router → http.Server
-  api/router.go        middleware chain, route groups, module routes, 404/405 handlers
+  api/main.go          config → logger → db pool → `migrate`, `create-owner`, or the app:
+                       repositories → services → controllers → routes → http.Server
   api/owner.go         the questions `api create-owner` asks
-  worker/main.go       config → logger → db pool → mailer → outbox worker with each module's jobs
+  worker/main.go       config → logger → db pool → mailer → outbox worker with the jobs' handlers
 internal/
-  audit/               the Log Action: Recorder writes action_logs rows inside the caller's transaction
-  audit/store/         sqlc output for sqlc/queries/audit.sql
-  auth/                sign-in, sessions, passwords, email flows, and their email jobs
-  auth/store/          sqlc output for sqlc/queries/auth.sql
-  device/              an outlet's cashier devices: activation, revoking, and which device a request comes from
-  device/store/        sqlc output for sqlc/queries/device.sql
-  health/              /healthz and /readyz
-  menu/                an outlet's categories and menus, and their stock: adjustments, the alert, the history
-  menu/store/          sqlc output for sqlc/queries/menu.sql
-  order/               the cashier: its catalog, orders with their lines and payments, voids, the totals rule
-  order/store/         sqlc output for sqlc/queries/order.sql
-  outlet/              outlets: the Owner's CRUD, and whether an outlet is open
-  outlet/store/        sqlc output for sqlc/queries/outlet.sql
-  payment/             Payment Control: which payment methods each outlet's cashier takes
-  payment/store/       sqlc output for sqlc/queries/payment.sql
-  table/               an outlet's areas, tables and their layouts, schedules, each table's status, the cashier's floor
-  table/store/         sqlc output for sqlc/queries/table.sql
-  user/                accounts, the permission catalog, custom roles, and managing staff
-  user/store/          sqlc output for sqlc/queries/user.sql
-  voucher/             the Owner's vouchers: their rules, an outlet's list, the cashier's check, a sale's use
-  voucher/store/       sqlc output for sqlc/queries/voucher.sql
-  platform/
-    config/            env parsing; every problem reported at once
-    db/                pgx pool (lazy connect), WithTx, Migrate
-    db/dbtest/         a migrated schema of its own for each integration test
-    httpx/             error envelope, CodedError, request binding, list pages, request ID on the context
+  config/              env parsing (every problem reported at once), the pgx pool (lazy connect),
+                       transactions (InTx, Conn), Migrate
+  routes/              the router: middleware chain, probes, route groups, 404/405;
+                       <resource>_routes.go registers each resource's routes
+  middlewares/         RequestID, Logger, Recovery, ErrorHandler, SecurityHeaders, BodyLimit, CORS,
+                       Authenticate, RequirePasswordChanged, RequireOwner, RequireManager,
+                       RequireManagerOrOwner, OutletScope, RequirePermission, RequireAnyPermission
+  controllers/         <resource>_controller.go: binds the request, calls a service, writes its answer
+  services/            <resource>_service.go: the business rules, their transactions, the Log Action
+  repositories/        <resource>_repository.go: the queries on the tables a resource owns, as models
+  repositories/store/  sqlc output, one package per sqlc/queries/<resource>.sql
+  validations/         request bodies, binding them and a list's page, and each resource's field rules
+  models/              entities, responses and the Principal; nothing of the database or HTTP
+  jobs/                background jobs' handlers, <resource>_jobs.go
+  utils/
+    apperror/          the coded error type, and the catalog of the services' and utils' errors (errors.go)
+    response/          the error envelope (Fail, WriteError) and list pages (NewList)
+    pagination/        a list's page
+    requestid/         the request ID on the context
+    jwt/               access tokens (HS256 JWT)
+    cookie/            the cashier device's cookie and header
     i18n/              id/en catalogs for error messages and emails
-    authn/             access tokens (HS256 JWT), the Principal on the context, the device token's cookie and header
     id/                CUID2 primary keys
     mail/              Mailer: SMTP, or the log in development; renders emails from i18n
-    middleware/        RequestID, Logger, Recovery, SecurityHeaders, BodyLimit, CORS, Authenticate,
-                       RequirePasswordChanged, RequireOwner, RequireManager, RequireManagerOrOwner,
-                       OutletScope, RequirePermission
-    outbox/            Enqueue, and the Worker that runs jobs
-    outbox/store/      sqlc output for sqlc/queries/outbox.sql
+    natural/           names in the order people read numbers (Meja 2 before Meja 10)
+    outbox/            Enqueue, and the Worker that runs jobs; outbox/store is its sqlc output
     password/          argon2id hashing and the rules for a new password
     ratelimit/         sliding-window attempt counts, in memory
+  tests/
+    architecture_test.go  what each layer may import
+    dbtest/            a migrated schema of its own for each integration test, and Hold
+    <resource>/        integration tests, HTTP through every layer into PostgreSQL
 api/openapi.yaml
 api/test-vectors/      calculations every client repeats (an order's totals, a voucher's discount), which the tests read too
 migrations/            goose SQL files; migrations.go embeds them into the api binary
-sqlc/                  sqlc.yaml and queries/<module>.sql
+sqlc/                  sqlc.yaml and queries/<resource>.sql
 ```
 
-The modules so far are auth, user (with roles and permissions), outlet, menu
-(with its stock), device, payment, voucher, table, order (the cashier), and audit,
-the spec's log. Planned, from the spec: table, sync, upload. How sign-in and permissions work, and
-the security baseline as shipped, is in [security.md](./security.md).
+The resources so far are auth, user (with roles, staff and the permission
+catalog), outlet, menu (categories, menus and their stock), device, payment,
+voucher, table (areas, tables, layouts, schedules and the dine-in mode),
+order (the cashier: its catalog and device, checkout, orders and voids), and
+audit, the spec's log. Planned, from the spec: sync and upload. How sign-in
+and permissions work, and the security baseline as shipped, is in
+[security.md](./security.md).
 
-## Modules and their dependencies
+## Layers and their dependencies
 
-A module talks to another only through a service interface that the
-*consumer* declares, listing just the methods it uses; `cmd/api/main.go` and
-`cmd/worker/main.go` pass in the real service. Methods that write in another
-module's transaction take a `pgx.Tx`, so both changes commit together.
+The code is split by layer, not by domain: each layer is one Go package, and
+a resource has a file in every layer it needs, named
+`<resource>_<layer>.go` (`voucher_service.go`, `voucher_repository.go`). The
+types carry the resource's name: `VoucherController`, `VoucherService`,
+`VoucherRepository`, `models.Voucher`. A large resource is split by
+sub-entity in every layer: menu into category, menu and stock; table into
+area, table, layout, schedule and dine-in mode; order into pos, checkout and
+order.
 
-| Module | Owns | Uses |
+A request goes down and its answer comes back up: routes → middlewares and
+controllers → services → repositories → the database, with models,
+validations, utils and config underneath.
+
+| Layer | May import, of `internal/` | Must not import |
 | --- | --- | --- |
-| auth | `refresh_tokens`, `auth_tokens` | user (`auth.Users`: accounts, passwords, permissions), outlet (`auth.Outlets`: open or not, and its language) |
-| user | `users`, `roles`, `role_permissions`, `user_roles` | auth's sessions, through `user.Sessions` (`auth.Sessions` ends them), without importing auth |
-| outlet | `outlets` | user (`outlet.Users`: a new outlet's cashier role, and its Managers), payment (`outlet.Payments`: a new outlet's methods), and whether an outlet has orders (`outlet.Orders`: `order.Records`), without importing order |
-| menu | `menu_categories`, `menus`, `stock_movements` | user (`menu.Users`: the names of who changed the stock, deleted accounts included) |
-| device | `devices` | user (`device.Users`: the names of who activated and revoked devices) |
-| payment | `outlet_payment_methods` | nothing |
-| voucher | `vouchers`, `voucher_outlets` | outlet (`voucher.Outlets`: outlets' codes and names, deleted ones too), device (`voucher.Devices`: the device a cashier checks a code from), and the sales that used a voucher (`voucher.Orders`: `order.Records`), without importing order |
-| table | `table_areas`, `tables`, `table_schedules`, `table_schedule_items` | outlet (`table.Outlets`: an outlet's hours and time zone), user (`table.Users`: the names of who made and cancelled schedules, deleted accounts included), and the sales at a table (`table.Orders`: `order.Records`), without importing order |
-| order | `orders`, `order_items`, `payments` | menu (`order.Menus`: the catalog, and the stock a sale takes and a void puts back), device (`order.Devices`: which device a request comes from, held for a sale), payment (`order.Payments`: the methods that are on), outlet (`order.Outlets`: the receipt's outlet and its rates, held for a sale), voucher (`order.Vouchers`: the use a sale takes and its void gives back), table (`order.Tables`: the table a sale is at, held for it), user (`order.Users`: cashiers' names) |
-| audit | `action_logs` | nothing; every module records through its own `Auditor` interface |
+| config | nothing | |
+| utils | config, utils | |
+| models | utils | gin, pgx |
+| validations | models, utils | pgx |
+| repositories | models, utils, config, repositories | gin |
+| services | repositories, models, validations, utils, config, services | gin, pgx |
+| controllers | services, validations, models, utils, controllers | pgx |
+| middlewares | models, utils, middlewares | pgx |
+| routes | controllers, middlewares, models, utils, config, routes | |
+| jobs | services, models, utils, jobs | gin, pgx |
 
-The directions are one way: auth → user, auth → outlet, outlet → user,
-outlet → payment, menu → user, device → user, voucher → outlet and device,
-table → outlet and user, and order → menu, device, payment, outlet, voucher,
-table and user. Four needs run against them, and are met the way
-`auth.Sessions` meets the user module's: a type in the module that owns the
-table, holding nothing and working in the caller's transaction, which
-`main.go` hands over. `auth.Sessions` ends a user's sessions;
-`order.Records` tells the outlet module whether an outlet has orders, which
-lock its code, the voucher module which sales used a voucher
-(`VoucherUses`), and the table module which sales were at a table
-(`TableSales`), which make it occupied.
+`internal/tests/architecture_test.go` checks every non-test file under
+`internal/` against this table, with the standard library alone. It also
+fails for a folder that is no layer, and for `repositories/store/` imported
+anywhere but the repositories.
 
-The user module's tests look outlets up in the database directly, since
-importing the outlet module would make a cycle, and the outlet module's
-tests count orders the same way; the menu module's tests do the same for
-`OutletScope`, and name users through the real user service. The voucher
-module's tests take uses with `Redeem`, as a sale does, and give the order
-module's history as a fake; so do the table module's, with sales as a fake;
-the order module's tests use every module it depends on, the voucher and
-table modules included, for real.
+- **Services hold the rules.** A service checks, decides, writes through
+  repositories and records the Log Action. It uses another resource through
+  that resource's service whenever its rules apply (a sale takes stock
+  through `MenuService`, which writes the movement), or through its
+  repository for a plain read or write of its rows (`StaffService` ends
+  sessions with `SessionRepository`): concrete types, wired by hand in
+  `cmd/api/main.go`. Where a test needs a fake instead, the service declares
+  the little it uses as an interface: `TableOrders` and `VoucherOrders`, the
+  sales a table and a voucher read, which `OrderRepository` meets.
+- **Repositories own tables.** Each table has one repository, the only code
+  with queries on it ([the data model](#data-model) names it). It turns
+  sqlc's rows into models and the database's errors into the catalog's: no
+  rows into `ErrVoucherNotFound`, a unique key into `ErrVoucherCodeTaken`.
+- **Middlewares know no service.** They declare what they need,
+  `PrincipalLoader` (`AuthService`) and `OutletFinder` (`OutletService`), and
+  the routes are handed the services.
+- **Controllers are thin.** They bind the request with `validations`, call
+  one service, and write the model's response, or leave the error with
+  `c.Error` for the error middleware.
+- **Transactions travel on the context.** `config.Database.InTx` begins one
+  and hands its function a context that carries it; every repository called
+  with that context runs its queries in it (`Conn(ctx)`), and an `InTx`
+  inside it joins it. So a sale is one transaction across the checkout,
+  device, outlet, payment, menu, voucher, dine-in mode and table services,
+  and none of them holds a `pgx.Tx`.
 
 ## Request lifecycle
 
-`cmd/api/router.go` installs the middleware in this order:
+`routes.New` (`internal/routes/routes.go`) installs the middleware in this
+order:
 
 1. **RequestID** — reuses a well-formed incoming `X-Request-ID` (up to 64
    characters of `A–Z a–z 0–9 - _`) or generates one; puts it on the context
@@ -126,11 +143,14 @@ table modules included, for real.
    Recovery so a panicking request is still logged with its 500.
 3. **Recovery** — turns a panic into the generic 500 envelope and logs the
    stack server-side.
-4. **SecurityHeaders** — `X-Content-Type-Options: nosniff` and
+4. **ErrorHandler** — once the handler returns, writes the error it left
+   with `c.Error` as the error envelope ([below](#errors)), unless it wrote a
+   response already.
+5. **SecurityHeaders** — `X-Content-Type-Options: nosniff` and
    `Cache-Control: no-store` on every response.
-5. **BodyLimit** — 1 MB; reading past it fails with `*http.MaxBytesError`,
+6. **BodyLimit** — 1 MB; reading past it fails with `*http.MaxBytesError`,
    which becomes a 413.
-6. **CORS** — exact origins from `CORS_ALLOWED_ORIGINS`, with credentials.
+7. **CORS** — exact origins from `CORS_ALLOWED_ORIGINS`, with credentials.
    A same-origin request, whose `Origin` host equals its `Host`, skips the
    list: browsers send `Origin` on every POST, and the web app is served from
    the API's own host. With no origins configured CORS is skipped entirely.
@@ -142,22 +162,23 @@ Routes under `/api/v1` sit in five groups:
 | public | none | Sign-in, refresh, sign-out, forgot and reset password, verify email |
 | authed | `Authenticate`: a valid access token and a live session; loads the Principal — account, permissions, outlet — onto the context | `GET /me` and `PUT /me/password`: all a user with a temporary password may do |
 | protected | also `RequirePasswordChanged`: 403 `password_change_required` until that password is replaced | The rest of `/me`, and `GET /permissions` |
-| owner | also `RequireOwner`: 403 `forbidden` for anyone else | `/outlets`, `/outlets/:oid`, `/outlets/:oid/status` |
-| scoped | also `OutletScope` on `/outlets/:oid`: 404 `outlet_not_found` for an outlet the principal may not act in | An outlet's roles, users, categories, menus and stock, devices, and the cashier; each route adds `RequirePermission` (or `RequireAnyPermission`) with its code, or for devices the fixed roles' `RequireManager` and `RequireManagerOrOwner` |
+| owner | also `RequireOwner`: 403 `forbidden` for anyone else | `/outlets`, `/outlets/:oid`, `/outlets/:oid/status`, and the vouchers (`/vouchers`, `/vouchers/:vid`, its status and redemptions) |
+| scoped | also `OutletScope` on `/outlets/:oid`: 404 `outlet_not_found` for an outlet the principal may not act in | An outlet's roles, users, categories, menus and stock, devices, areas, tables, layouts, schedules and dine-in mode, its vouchers, and the cashier; each route adds `RequirePermission` (or `RequireAnyPermission`) with its code, or for devices and the outlet's voucher list the fixed roles' `RequireManager` and `RequireManagerOrOwner` |
 
-Modules register on protected, owner or scoped, and on authed only when an
-endpoint must work before a temporary password is replaced. Which route needs
+Each resource's routes (`routes/<resource>_routes.go`) register on
+protected, owner or scoped, and on authed only when an endpoint must work
+before a temporary password is replaced. Which route needs
 which permission is in [security.md](./security.md#permissions). The probes
 stay public and outside `/api/v1`.
 
-`TestRoutesMatchTheContract` (`cmd/api`) compares the routes Gin serves with
+`TestRoutesMatchTheContract` (`internal/routes`) compares the routes Gin serves with
 the paths and methods in `api/openapi.yaml`, both ways, so the contract the
 clients generate from can't drift from the code.
 
 ## Lists
 
 A list endpoint takes `?page=` (from 1) and `?page_size=` (1 to 100, 20 by
-default) through `httpx.BindPage`, and answers `httpx.NewList`:
+default) through `validations.BindPage`, and answers `response.NewList`:
 `{"data": [...], "meta": {"page", "page_size", "total"}}`, with `data` never
 `null`. A value out of range is 422 `validation_failed` naming the parameter.
 Search terms (`?q=`) match with `ILIKE`, their `%` and `_` escaped.
@@ -170,12 +191,16 @@ Every error response is the same envelope:
 { "error": { "code": "stock_insufficient", "message": "Only 3 left in stock.", "details": { "available": 3 }, "request_id": "…" } }
 ```
 
-Handlers call `httpx.Fail(c, logger, err)`:
+Controllers leave an error with `c.Error(err)` and return;
+`middlewares.ErrorHandler` renders it with `response.Fail`:
 
-- An error that implements `httpx.CodedError` (usually declared with
-  `httpx.NewError(status, code)` in a module's `errors.go`) is rendered with
-  its own status and code, even when wrapped with `%w`. Its `Error()` string
-  is the code, which is what logs show.
+- An error that implements `apperror.CodedError` (declared with
+  `apperror.NewError(status, code)` in the catalog,
+  `internal/utils/apperror/errors.go`) is rendered with its own status and
+  code, even when wrapped with `%w`. Its `Error()` string is the code, which
+  is what logs show. The catalog holds every coded error the services and
+  utils return, by what it is about; the plain errors in it are for services
+  that call each other, which decide what they mean to the client.
 - `*http.MaxBytesError` becomes 413 `payload_too_large`.
 - Anything else is logged with the request ID and rendered as a generic 500
   `internal_error`, so internal details never reach the client.
@@ -186,7 +211,7 @@ Unknown routes return 404 `not_found` and wrong methods return 405
 ## Languages
 
 `message` is never written in Go. It is the `error.<code>` entry of the
-catalogs in `internal/platform/i18n/locales/` (`id.json`, `en.json`), in the
+catalogs in `internal/utils/i18n/locales/` (`id.json`, `en.json`), in the
 language of the request's `Accept-Language` header, with the error's
 `details` filling template fields such as `{{.available}}`. The response's
 `Content-Language` header says which language was used.
@@ -198,8 +223,8 @@ language of the request's `Accept-Language` header, with the error's
   or uses different template fields than `id.json`. That is the check the
   spec asks CI to make.
 - `TestEveryErrorCodeHasAMessage` reads every Go file in the module and
-  fails for a code passed to `httpx.NewError` or `httpx.WriteError` that has
-  no message, or that isn't a string literal. A module's new error therefore
+  fails for a code passed to `apperror.NewError` or `response.WriteError`
+  that has no message, or that isn't a string literal. A new error therefore
   fails the tests, naming the key to add, before a client can see a message
   ID.
 - Emails use the same catalogs, in the recipient's stored language
@@ -244,7 +269,7 @@ Only the worker sends email, always from an outbox job, through the
 `mail.Render` builds a message from the i18n catalogs in the recipient's
 language: `email.<name>.subject`, `.body` (paragraphs separated by a blank
 line) and `.action` (the button's label), inside the shared layout in
-`internal/platform/mail/templates/layout.html`. Every message has a
+`internal/utils/mail/templates/layout.html`. Every message has a
 plain-text part and an HTML alternative. It fails — so the job retries and
 eventually parks — for an unknown email or missing template data, instead
 of sending `<no value>` to someone. The emails so far are `password_reset`,
@@ -254,13 +279,15 @@ of sending `<no value>` to someone. The emails so far are `password_reset`,
 
 - The pool connects lazily: the API starts even when PostgreSQL is down, and
   `/readyz` returns 503 `not_ready` until it answers.
-- Services group writes with `db.WithTx`, which commits on success and rolls
-  back on an error or a panic.
+- Services group writes with `db.InTx`, which commits on success and rolls
+  back on an error or a panic. The transaction travels on the context
+  ([above](#layers-and-their-dependencies)); an `InTx` inside another joins
+  it.
 - Primary keys come from `id.New()` (CUID2), never from the database;
   `id.Valid` checks the shape of IDs that clients send.
-- Queries are written in `sqlc/queries/<module>.sql` and generated into
-  `internal/<module>/store/` — one package per module, so a module can't
-  reach another module's queries. `omit_unused_structs` keeps each package
+- Queries are written in `sqlc/queries/<resource>.sql` and generated into
+  `internal/repositories/store/<resource>/`, one package per file, which
+  only the repositories import. `omit_unused_structs` keeps each package
   to the row types its own queries use, and timestamps come out as
   `time.Time` (`*time.Time` when nullable) instead of pgx wrappers.
 - sqlc runs from its Docker image (`make generate`). From Git Bash without
@@ -286,40 +313,40 @@ of sending `<no value>` to someone. The emails so far are `password_reset`,
 
 ## Data model
 
-| Table | Owner | Notes |
+| Table | Repository | Notes |
 | --- | --- | --- |
-| `users` | user | Everyone who signs in. Username lowercase, unique forever (`users_username_key`, never reused after a delete). Exactly one Owner (`users_single_owner_key`), who has an email, no outlet, and can't be deactivated or deleted; everyone else belongs to one outlet (`users_outlet_id_fkey`). `is_manager` marks a Manager; `must_change_password` a password someone else set. Soft delete |
-| `outlets` | outlet | Code `^[A-Z0-9]{2,10}$`, unique forever (`outlets_code_key`, printed in receipt numbers). IANA time zone and default language. Opening hours both set or both empty, and not equal (`outlets_hours_check`); a closing time before the opening time runs past midnight. Tax and service charge in basis points (`tax_bps`, `service_bps`, 0–10000), so money is never computed in floats; the API speaks percentages with two decimals. Soft delete, only once inactive (`outlets_deleted_check`) |
-| `roles` | user | An outlet's custom roles; the Owner's and Managers' are fixed in code, not rows. Name unique per outlet, in any case, among roles not deleted (`roles_outlet_name_key`). Soft delete |
-| `role_permissions` | user | A role's permission codes (`role_permissions_code_check` checks their shape; the catalog is in code) |
-| `user_roles` | user | A staff member's role: one per user for now (`user_roles_user_key`), kept in a table of its own so several roles need no data migration. Its composite foreign keys (`user_roles_user_fkey`, `user_roles_role_fkey`) make the role's outlet the user's own, keep the Owner, who has no outlet, out, and stop a user moving outlet while holding a role |
-| `refresh_tokens` | auth | One row per refresh token, hashed. `family_id` is the session: alive while the family has a token that is neither replaced, revoked nor expired |
-| `auth_tokens` | auth | Single-use email tokens (`password_reset`, `email_verify`), hashed. An email change waits in `email` here until confirmed; the user's current address stays in place |
-| `menu_categories` | menu | An outlet's categories. Name unique per outlet, in any case, among categories not deleted (`menu_categories_outlet_name_key`). An emoji icon of 1–8 characters (`menu_categories_icon_check`); the service also refuses letters, spaces and anything without a pictograph. `sort_order` is the cashier's order. Soft delete, only while it holds no menu that isn't deleted |
-| `menus` | menu | Price in whole Rupiah, 0–100.000.000 (`menus_price_check`). Its category is its outlet's own (`menus_category_fkey`, on the category and outlet together). SKU `^[A-Za-z0-9._-]{1,32}$`, unique per outlet in any case among menus not deleted (`menus_outlet_sku_key`). `stock_qty` is a cache: always the last stock movement's `stock_after` ([below](#stock)). It has no CHECK ≥ 0, so a sale made offline can take it below zero. `stock_alert` ≥ 0, where 0 or NULL is off. `image_key` waits for uploads. Soft delete |
-| `stock_movements` | menu | Every change to a tracked menu's count. `type` is `initial` (the count tracking starts from), `in`, `out` or `set` (a stock take), or `sale` and `void` for the cashier, which name their order and nothing else does (`stock_movements_order_check`, `stock_movements_order_fkey`). Each row keeps the change and the count it left, the user, and a sale's order. `reason` is `initial` for a start, one of `restock`, `damaged`, `correction` and `other` for an adjustment, and none for a sale or void (`stock_movements_reason_check`). The change goes the way its type says (`stock_movements_direction_check`), and only a sale may leave the count below zero (`stock_movements_stock_after_check`). The menu is its outlet's own (`stock_movements_menu_fkey`). Append-only like `action_logs` |
-| `devices` | device | An outlet's cashier devices. `code` `^K[0-9]{2,4}$`, unique per outlet and never reused, since receipt numbers carry it (`devices_outlet_code_key`). The token is kept as its SHA-256 (`token_hash`, unique). `platform` `web` or `android`. Who activated it and when it was last seen; revoked by whom and when, both or neither (`devices_revoked_check`). The app never deletes one: a revoked device stays, with its code |
-| `outlet_payment_methods` | payment | One row per outlet and method (`cash`, `qris`, `debit`), on or off. A new outlet gets cash on and the others off, in the transaction that creates it; the migration gave existing outlets the same |
-| `vouchers` | voucher | The Owner's discount vouchers. Code `^[A-Z0-9]{3,20}$`, unique among vouchers not deleted (`vouchers_code_key`): a deleted one was never used, so its code is free again. `type` `percent` (`value` in basis points, at most 10000) or `amount` (rupiah) (`vouchers_value_check`); `max_discount` only for a percentage (`vouchers_max_discount_check`); `min_spend` optional. `quota` 1–1.000.000 uses in every outlet together, `used_count` 0 to the quota (`vouchers_used_count_check`). `expired_at` after `start_at`, which may be empty (`vouchers_period_check`). `first_used_at` is set by the first sale and never cleared: a voucher with uses has one (`vouchers_first_used_check`), and only a voucher without one may be deleted (`vouchers_deleted_check`). `voucher_status(...)` is the one definition of a voucher's status at a moment ([below](#vouchers)). Soft delete |
-| `voucher_outlets` | voucher | The outlets a voucher is for when it isn't `all_outlets`. Both keys are foreign keys |
-| `table_areas` | table | An outlet's areas (Indoor, Lantai 2), each with its own layout. Name 1–50, unique per outlet in any case among areas not deleted (`table_areas_outlet_name_key`). `sort_order` is the cashier's order. `decorations` is the layout's walls, cashier and doors, a JSON array (`table_areas_decorations_check`). `layout_version` goes up with every save of the layout and every table of the area made, changed or deleted, never with a table turned on or off. Soft delete, only while it holds no table |
-| `tables` | table | Name 1–30, unique per outlet in any case among tables not deleted (`tables_outlet_name_key`). Its area is its outlet's own (`tables_area_fkey`, on the area and outlet together). Seats 1–99 or none (`tables_capacity_check`); shape `square`, `round` or `rectangle` (`tables_shape_check`). Its place on its area's layout is a box of whole cells, `x`, `y`, `w`, `h` all set or none (a table not placed), 2–16 cells a side, inside the 48 × 32 grid (`tables_box_check`), with a rotation of 0, 90, 180 or 270 (`tables_rotation_check`). `released_at` is when the cashier last released it. Soft delete |
-| `table_schedules` | table | A time the outlet's chosen tables are out: a title 1–100, `end_at` after `start_at` (`table_schedules_period_check`), and a cancellation's time and who, both or neither (`table_schedules_cancelled_check`). `table_schedule_status(...)` is the one definition of its status at a moment ([below](#tables)). Kept as history: cancelled, never deleted |
-| `table_schedule_items` | table | A schedule's tables; the table and the schedule are the same outlet's (both foreign keys carry it) |
-| `dine_in_settings` | table | How an outlet seats its dine-in customers: `mode` is `table`, at the tables of its layout, or `number`, by the number stands the cashier hands out (`dine_in_settings_mode_check`), with who changed it and when. An outlet without a row seats them at tables |
-| `orders` | order | The cashier's transactions. `order_id` and `order_no` come from the device. `order_no` is `OUTLETCODE-KCODE-YYYYMMDD-NNNN` (`orders_order_no_check`), unique per outlet (`orders_outlet_order_no_key`); its device is the outlet's own (`orders_device_fkey`, on the device and outlet together). The rates it was charged at are kept with it, and CHECKs hold its figures to the totals rule: the service on the subtotal less the voucher's discount, the tax on that plus the service, each rounded half up, and the total their sum (`orders_service_check`, `orders_tax_check`, `orders_total_check`). A voucher's sale names it (`orders_voucher_fkey`) and copies its code (`voucher_code`), both or neither, and a discount needs a voucher (`orders_voucher_check`); a voucher may give none, rounded to zero on a small subtotal. A sale at a table names it (`orders_table_fkey`, a table of the same outlet) and copies its name (`table_name`), both or neither, and only a dine-in order has one (`orders_table_check`). A sale by a number stand keeps the stand's number (`stand_number`: 1–10 capitals, digits and hyphens, a hyphen only between them), only a dine-in one, and never with a table (`orders_stand_number_check`). `created_at` is `clock_timestamp()`, the moment the row is written, not the transaction's start: with `released_at`, written the same way under the table's lock, "sold after it was released" follows the order the locks were taken in. `request_hash` is the SHA-256 of the order as the device sent it. `client_created_at` is when the device made it. A void has its time, who and why, all three or none (`orders_void_check`). Kept as made: triggers refuse DELETE and TRUNCATE, and any UPDATE but paid → void of the void columns (SQLSTATE 42501) |
-| `order_items` | order | An order's lines, in order (`position`), with the menu's name and price copied at the sale; qty 1–999, `line_total` = price × qty. The menu is the order's outlet's own (`order_items_menu_fkey`). Triggers refuse UPDATE, DELETE and TRUNCATE |
-| `payments` | order | One per order (`payments_order_key`). Cash keeps what was handed over and the change, never less than the amount (`payments_cash_check`). Changes only from paid to void |
-| `action_logs` | audit | The Log Action. Append-only: triggers refuse UPDATE, DELETE and TRUNCATE (SQLSTATE 42501). `outlet_id` references the outlet it happened in (`action_logs_outlet_id_fkey`) |
-| `outbox_jobs` | platform/outbox | Background jobs ([below](#background-jobs-outbox)) |
+| `users` | `UserRepository` | Everyone who signs in. Username lowercase, unique forever (`users_username_key`, never reused after a delete). Exactly one Owner (`users_single_owner_key`), who has an email, no outlet, and can't be deactivated or deleted; everyone else belongs to one outlet (`users_outlet_id_fkey`). `is_manager` marks a Manager; `must_change_password` a password someone else set. Soft delete |
+| `outlets` | `OutletRepository` | Code `^[A-Z0-9]{2,10}$`, unique forever (`outlets_code_key`, printed in receipt numbers). IANA time zone and default language. Opening hours both set or both empty, and not equal (`outlets_hours_check`); a closing time before the opening time runs past midnight. Tax and service charge in basis points (`tax_bps`, `service_bps`, 0–10000), so money is never computed in floats; the API speaks percentages with two decimals. Soft delete, only once inactive (`outlets_deleted_check`) |
+| `roles` | `RoleRepository` | An outlet's custom roles; the Owner's and Managers' are fixed in code, not rows. Name unique per outlet, in any case, among roles not deleted (`roles_outlet_name_key`). Soft delete |
+| `role_permissions` | `RoleRepository` | A role's permission codes (`role_permissions_code_check` checks their shape; the catalog is in code) |
+| `user_roles` | `UserRepository` | A staff member's role: one per user for now (`user_roles_user_key`), kept in a table of its own so several roles need no data migration. Its composite foreign keys (`user_roles_user_fkey`, `user_roles_role_fkey`) make the role's outlet the user's own, keep the Owner, who has no outlet, out, and stop a user moving outlet while holding a role |
+| `refresh_tokens` | `SessionRepository` | One row per refresh token, hashed. `family_id` is the session: alive while the family has a token that is neither replaced, revoked nor expired |
+| `auth_tokens` | `AuthTokenRepository` | Single-use email tokens (`password_reset`, `email_verify`), hashed. An email change waits in `email` here until confirmed; the user's current address stays in place |
+| `menu_categories` | `CategoryRepository` | An outlet's categories. Name unique per outlet, in any case, among categories not deleted (`menu_categories_outlet_name_key`). An emoji icon of 1–8 characters (`menu_categories_icon_check`); the service also refuses letters, spaces and anything without a pictograph. `sort_order` is the cashier's order. Soft delete, only while it holds no menu that isn't deleted |
+| `menus` | `MenuRepository` | Price in whole Rupiah, 0–100.000.000 (`menus_price_check`). Its category is its outlet's own (`menus_category_fkey`, on the category and outlet together). SKU `^[A-Za-z0-9._-]{1,32}$`, unique per outlet in any case among menus not deleted (`menus_outlet_sku_key`). `stock_qty` is a cache: always the last stock movement's `stock_after` ([below](#stock)). It has no CHECK ≥ 0, so a sale made offline can take it below zero. `stock_alert` ≥ 0, where 0 or NULL is off. `image_key` waits for uploads. Soft delete |
+| `stock_movements` | `StockRepository` | Every change to a tracked menu's count. `type` is `initial` (the count tracking starts from), `in`, `out` or `set` (a stock take), or `sale` and `void` for the cashier, which name their order and nothing else does (`stock_movements_order_check`, `stock_movements_order_fkey`). Each row keeps the change and the count it left, the user, and a sale's order. `reason` is `initial` for a start, one of `restock`, `damaged`, `correction` and `other` for an adjustment, and none for a sale or void (`stock_movements_reason_check`). The change goes the way its type says (`stock_movements_direction_check`), and only a sale may leave the count below zero (`stock_movements_stock_after_check`). The menu is its outlet's own (`stock_movements_menu_fkey`). Append-only like `action_logs` |
+| `devices` | `DeviceRepository` | An outlet's cashier devices. `code` `^K[0-9]{2,4}$`, unique per outlet and never reused, since receipt numbers carry it (`devices_outlet_code_key`). The token is kept as its SHA-256 (`token_hash`, unique). `platform` `web` or `android`. Who activated it and when it was last seen; revoked by whom and when, both or neither (`devices_revoked_check`). The app never deletes one: a revoked device stays, with its code |
+| `outlet_payment_methods` | `PaymentRepository` | One row per outlet and method (`cash`, `qris`, `debit`), on or off. A new outlet gets cash on and the others off, in the transaction that creates it; the migration gave existing outlets the same |
+| `vouchers` | `VoucherRepository` | The Owner's discount vouchers. Code `^[A-Z0-9]{3,20}$`, unique among vouchers not deleted (`vouchers_code_key`): a deleted one was never used, so its code is free again. `type` `percent` (`value` in basis points, at most 10000) or `amount` (rupiah) (`vouchers_value_check`); `max_discount` only for a percentage (`vouchers_max_discount_check`); `min_spend` optional. `quota` 1–1.000.000 uses in every outlet together, `used_count` 0 to the quota (`vouchers_used_count_check`). `expired_at` after `start_at`, which may be empty (`vouchers_period_check`). `first_used_at` is set by the first sale and never cleared: a voucher with uses has one (`vouchers_first_used_check`), and only a voucher without one may be deleted (`vouchers_deleted_check`). `voucher_status(...)` is the one definition of a voucher's status at a moment ([below](#vouchers)). Soft delete |
+| `voucher_outlets` | `VoucherRepository` | The outlets a voucher is for when it isn't `all_outlets`. Both keys are foreign keys |
+| `table_areas` | `AreaRepository` | An outlet's areas (Indoor, Lantai 2), each with its own layout. Name 1–50, unique per outlet in any case among areas not deleted (`table_areas_outlet_name_key`). `sort_order` is the cashier's order. `decorations` is the layout's walls, cashier and doors, a JSON array (`table_areas_decorations_check`). `layout_version` goes up with every save of the layout and every table of the area made, changed or deleted, never with a table turned on or off. Soft delete, only while it holds no table |
+| `tables` | `TableRepository` | Name 1–30, unique per outlet in any case among tables not deleted (`tables_outlet_name_key`). Its area is its outlet's own (`tables_area_fkey`, on the area and outlet together). Seats 1–99 or none (`tables_capacity_check`); shape `square`, `round` or `rectangle` (`tables_shape_check`). Its place on its area's layout is a box of whole cells, `x`, `y`, `w`, `h` all set or none (a table not placed), 2–16 cells a side, inside the 48 × 32 grid (`tables_box_check`), with a rotation of 0, 90, 180 or 270 (`tables_rotation_check`). `released_at` is when the cashier last released it. Soft delete |
+| `table_schedules` | `ScheduleRepository` | A time the outlet's chosen tables are out: a title 1–100, `end_at` after `start_at` (`table_schedules_period_check`), and a cancellation's time and who, both or neither (`table_schedules_cancelled_check`). `table_schedule_status(...)` is the one definition of its status at a moment ([below](#tables)). Kept as history: cancelled, never deleted |
+| `table_schedule_items` | `ScheduleRepository` | A schedule's tables; the table and the schedule are the same outlet's (both foreign keys carry it) |
+| `dine_in_settings` | `DineInModeRepository` | How an outlet seats its dine-in customers: `mode` is `table`, at the tables of its layout, or `number`, by the number stands the cashier hands out (`dine_in_settings_mode_check`), with who changed it and when. An outlet without a row seats them at tables |
+| `orders` | `OrderRepository` | The cashier's transactions. `order_id` and `order_no` come from the device. `order_no` is `OUTLETCODE-KCODE-YYYYMMDD-NNNN` (`orders_order_no_check`), unique per outlet (`orders_outlet_order_no_key`); its device is the outlet's own (`orders_device_fkey`, on the device and outlet together). The rates it was charged at are kept with it, and CHECKs hold its figures to the totals rule: the service on the subtotal less the voucher's discount, the tax on that plus the service, each rounded half up, and the total their sum (`orders_service_check`, `orders_tax_check`, `orders_total_check`). A voucher's sale names it (`orders_voucher_fkey`) and copies its code (`voucher_code`), both or neither, and a discount needs a voucher (`orders_voucher_check`); a voucher may give none, rounded to zero on a small subtotal. A sale at a table names it (`orders_table_fkey`, a table of the same outlet) and copies its name (`table_name`), both or neither, and only a dine-in order has one (`orders_table_check`). A sale by a number stand keeps the stand's number (`stand_number`: 1–10 capitals, digits and hyphens, a hyphen only between them), only a dine-in one, and never with a table (`orders_stand_number_check`). `created_at` is `clock_timestamp()`, the moment the row is written, not the transaction's start: with `released_at`, written the same way under the table's lock, "sold after it was released" follows the order the locks were taken in. `request_hash` is the SHA-256 of the order as the device sent it. `client_created_at` is when the device made it. A void has its time, who and why, all three or none (`orders_void_check`). Kept as made: triggers refuse DELETE and TRUNCATE, and any UPDATE but paid → void of the void columns (SQLSTATE 42501) |
+| `order_items` | `OrderRepository` | An order's lines, in order (`position`), with the menu's name and price copied at the sale; qty 1–999, `line_total` = price × qty. The menu is the order's outlet's own (`order_items_menu_fkey`). Triggers refuse UPDATE, DELETE and TRUNCATE |
+| `payments` | `OrderRepository` | One per order (`payments_order_key`). Cash keeps what was handed over and the change, never less than the amount (`payments_cash_check`). Changes only from paid to void |
+| `action_logs` | `AuditRepository` | The Log Action. Append-only: triggers refuse UPDATE, DELETE and TRUNCATE (SQLSTATE 42501). `outlet_id` references the outlet it happened in (`action_logs_outlet_id_fkey`) |
+| `outbox_jobs` | `utils/outbox` | Background jobs ([below](#background-jobs-outbox)) |
 
-A table has one owning module, the only one with queries on it; other
-modules go through that module's service.
+A table has one repository, the only code with queries on it; the other
+resources reach it through its service.
 
 ## Stock
 
 - **One way in.** A tracked menu's count changes only through
-  `recordMovement` (`internal/menu/stock.go`): it writes the movement and sets
+  `recordMovement` (`internal/services/stock_service.go`): it writes the movement and sets
   `menus.stock_qty` to its `stock_after`, in the caller's transaction, so the
   cache always equals the history. A new tracked menu, and one whose
   tracking is turned on, start with an `initial` movement.
@@ -349,7 +376,7 @@ modules go through that module's service.
   the next code (`K01`, `K02`, …, under a per-outlet advisory lock, never
   reused) and a token only it holds: a browser as the `maki_device` cookie,
   the Android app in the body, for its secure storage and the
-  `X-Device-Token` header. `authn.DeviceToken` reads either.
+  `X-Device-Token` header. `cookie.DeviceToken` reads either.
   ([security.md](./security.md#cashier-devices) has the rest.)
 - **The catalog** (`GET /outlets/{oid}/pos/catalog`) is one answer, so a
   device can later keep it offline whole: the outlet for the receipt with
@@ -374,18 +401,18 @@ modules go through that module's service.
   outlet, is 409 `order_id_conflict`, which tells nothing of the order.
   Whatever doesn't fit as sent is a 422 with each field's rule, a line's by
   its path (`items.0.qty`).
-- **One transaction, locks in one order.** The device first (`Hold`,
+- **One transaction, locks in one order.** The device first (`DeviceService.Hold`,
   `FOR UPDATE`, which also marks it seen): a revocation waits for the sale,
   and the device's sales go one at a time, so a resend that came while the
   first was on its way finds its order once it gets the lock. Then the
-  outlet (`HoldForSale`, `FOR SHARE`): its code, time zone and rates stay as
+  outlet (`OutletService.HoldForSale`, `FOR SHARE`): its code, time zone and rates stay as
   the sale reads them, and an Owner's change waits for the sale. Then the
   menus, `FOR UPDATE` in the order of their IDs (`LockMenusForSale`), so two
   sales of the same menus never deadlock and the last of a menu is sold
-  once. Then the voucher, when the order names one (`voucher.Redeem`,
+  once. Then the voucher, when the order names one (`VoucherService.Redeem`,
   `LockVoucherByCode`, `FOR UPDATE`): two outlets after its last use, whose
   other locks are apart, wait for each other only there, and the second
-  finds it used up. Then the outlet's dine-in mode (`table.HoldDineInMode`,
+  finds it used up. Then the outlet's dine-in mode (`DineInModeService.HoldDineInMode`,
   an advisory lock of the outlet's mode, shared with its other sales): a
   change of it waits for the sale, which is saved under the mode it was
   checked against. Where the outlet seats its customers by number stands
@@ -393,7 +420,7 @@ modules go through that module's service.
   table or a dine-in order without a number in the one, a number in the
   other, is 409 `dine_in_mode_changed` with the mode (`details.mode`), and
   nothing is taken. Last the table, when the order names one
-  (`table.HoldForSale`, `FOR SHARE OF t`): two sales at a table don't wait
+  (`TableService.HoldForSale`, `FOR SHARE OF t`): two sales at a table don't wait
   for each other, but deleting or changing the table, or releasing it,
   waits for the sale. A table deleted, turned off, scheduled off, or
   another outlet's is 409 `table_unavailable`, with its status
@@ -407,12 +434,12 @@ modules go through that module's service.
   `prices_changed` (each menu's price now), `order_stock_insufficient`
   (what each menu has, its lines together), a voucher the sale can't take
   (as the cashier's check refuses it, and `voucher_min_spend` with the
-  minimum), `total_changed` (the server's total from `order.ComputeTotals`,
+  minimum), `total_changed` (the server's total from `services.ComputeTotals`,
   the subtotal less the voucher's discount, the rule
   `api/test-vectors/order-totals.json` pins down for every client) and
   `payment_method_unavailable`. Then the order with its voucher's code and
   its table's name or its stand's number, its lines, its cash payment with
-  the change, the sale movements (`menu.RecordSale`), the voucher's use,
+  the change, the sale movements (`MenuService.RecordSale`), the voucher's use,
   and `order.created` in the Log Action, with its device, its voucher, and
   its table or its stand's number.
 - **A resend takes no second use.** The voucher's code is in the hash, in
@@ -421,18 +448,18 @@ modules go through that module's service.
   tables or stands keep their hashes.
 - **Voids** need `order.void` and a reason. The order is locked `FOR
   UPDATE`; it and its payment become void, and what it sold goes back to
-  the menus still tracked (`menu.RecordVoid`: a deleted menu, or one no
+  the menus still tracked (`MenuService.RecordVoid`: a deleted menu, or one no
   longer tracked, keeps its count). Its voucher's use goes back too
-  (`voucher.Release`, after the menus, as in a sale), the voucher turned off
+  (`VoucherService.Release`, after the menus, as in a sale), the voucher turned off
   since or not. `order.voided` in the Log Action.
 - **Today's orders** (`GET /outlets/{oid}/orders`) are the outlet's day, in
   its time zone, newest first, searchable by part of the receipt number.
 - **The outlet's code locks** with the first order (409
   `outlet_code_locked`), since every receipt number carries it: `Update`
   holds the outlet `FOR UPDATE`, which waits for a sale holding it, then
-  asks `order.Records` whether there is an order.
-- **Tested for real.** The order module's tests run every module it uses,
-  and its races are made to happen: a test holds the lock (a menu, the
+  asks `OrderRepository.HasOrders` whether there is an order.
+- **Tested for real.** The order tests (`internal/tests/order`) run every
+  service the checkout uses, and its races are made to happen: a test holds the lock (a menu, the
   device, an order, the outlet, a voucher, a table) until every request
   waits for it in `pg_locks`, then lets them go. Two cashiers buying the
   last one sell it once; an order and its resend at once make one order;
@@ -464,7 +491,7 @@ modules go through that module's service.
   update locks the voucher first, so a sale under way takes its use before
   the rules are checked, and every problem is reported at once. A used
   voucher can't be deleted (409 `voucher_used`): it is deactivated instead.
-- **The discount.** `voucher.Terms.Discount`: a percentage of the subtotal
+- **The discount.** `voucherDiscount` (`services/voucher_service.go`): a percentage of the subtotal
   rounded half up, held to its maximum; an amount as it is; either never
   past the subtotal; nothing short of the minimum spend.
   `api/test-vectors/voucher-discounts.json` pins it for the web and Android
@@ -549,10 +576,10 @@ modules go through that module's service.
 Work that follows a committed change but needn't finish before the response
 goes through the `outbox_jobs` table:
 
-1. A service calls `outbox.Enqueue(ctx, tx, kind, payload)` with the
-   transaction that makes the change. It takes a `pgx.Tx`, so a job can't be
-   enqueued outside one, and it exists only if the change commits.
-   `EnqueueAt` schedules a job for later.
+1. A service calls `outbox.Enqueue(ctx, s.db.Conn(ctx), kind, payload)`
+   inside the `InTx` that makes the change, so the job is written in that
+   transaction and exists only if the change commits. `EnqueueAt` schedules
+   a job for later.
 2. The worker claims a due job whenever one of its slots is free (4 by
    default), with `FOR UPDATE SKIP LOCKED`, so several workers never take the
    same job. It only claims kinds it has a handler for, so during a deploy an
@@ -576,9 +603,9 @@ Rules for handlers:
 
 - **Idempotent.** A job can run twice: a crash after the work but before the
   outcome is recorded, or a run that outlives its lease.
-- **Kinds** are named `<module>.<action>`, declared as constants in the
-  module that owns them; that module's handler is registered in
-  `cmd/worker/main.go`.
+- **Kinds** are named `<resource>.<action>`, declared in `models/job.go`;
+  their handlers are in `internal/jobs` (`<resource>_jobs.go`, which calls
+  the services), registered in `cmd/worker/main.go`.
 - **Payloads carry IDs**, not copies of data that may change before the job
   runs. They are plain JSON in the database and kept for 7 days after the job
   is done, so a secret belongs in one only if it expires quickly, like a
@@ -597,6 +624,17 @@ WHERE outbox_job_id = '…';
 ## Testing
 
 - `go test ./...` runs every test, integration tests included.
+- Integration tests live in `internal/tests/<resource>/`. Each folder's
+  harness wires the real routes, middleware, controllers, services and
+  repositories, as `cmd/api` does, and drives the endpoints over HTTP; an
+  `X-Test-As` header names who is calling. The table and voucher tests fake
+  the sales they read; the order tests make them. A rule with no database
+  to it is tested in `services` instead: an order's totals and a voucher's
+  discount against `api/test-vectors/`, an order's hash, a table's status.
+- A test that makes a race happen holds a lock and waits until the other
+  requests wait for it in `pg_locks`. `dbtest.Hold` gives it a transaction
+  of its own, on the context as a service's would be, that it keeps open
+  while the requests run.
 - Integration tests call `dbtest.New(t)`. It creates a schema of the test's
   own in `TEST_DATABASE_URL`, applies every migration to it, and drops it
   when the test ends. That schema is the connection's whole `search_path`,
