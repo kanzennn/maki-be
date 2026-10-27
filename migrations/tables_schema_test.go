@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kervzent/maki-be/internal/platform/db/dbtest"
+	"github.com/kervzent/maki-be/internal/tests/dbtest"
 )
 
 // insertArea inserts an area of the outlet, first in the order, with no

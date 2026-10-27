@@ -30,20 +30,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kervzent/maki-be/internal/audit"
-	"github.com/kervzent/maki-be/internal/auth"
-	"github.com/kervzent/maki-be/internal/device"
-	"github.com/kervzent/maki-be/internal/menu"
-	"github.com/kervzent/maki-be/internal/order"
-	"github.com/kervzent/maki-be/internal/outlet"
-	"github.com/kervzent/maki-be/internal/payment"
-	"github.com/kervzent/maki-be/internal/platform/authn"
-	"github.com/kervzent/maki-be/internal/platform/config"
-	"github.com/kervzent/maki-be/internal/platform/db"
-	"github.com/kervzent/maki-be/internal/platform/password"
-	"github.com/kervzent/maki-be/internal/table"
-	"github.com/kervzent/maki-be/internal/user"
-	"github.com/kervzent/maki-be/internal/voucher"
+	"github.com/kervzent/maki-be/internal/config"
+	"github.com/kervzent/maki-be/internal/controllers"
+	"github.com/kervzent/maki-be/internal/repositories"
+	"github.com/kervzent/maki-be/internal/routes"
+	"github.com/kervzent/maki-be/internal/services"
+	"github.com/kervzent/maki-be/internal/utils/jwt"
+	"github.com/kervzent/maki-be/internal/utils/password"
 )
 
 const usage = `usage:
@@ -84,7 +77,7 @@ func run(args []string) error {
 	// After the first signal, a second one kills the process at once.
 	context.AfterFunc(ctx, stop)
 
-	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	pool, err := config.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
@@ -92,9 +85,9 @@ func run(args []string) error {
 
 	switch command {
 	case "migrate":
-		return db.Migrate(ctx, pool, logger)
+		return config.Migrate(ctx, pool, logger)
 	case "create-owner":
-		svc, err := newServices(cfg, logger, pool)
+		svc, err := newApp(cfg, logger, pool)
 		if err != nil {
 			return err
 		}
@@ -103,68 +96,111 @@ func run(args []string) error {
 	return serve(ctx, cfg, logger, pool)
 }
 
-// services are the modules' services, each built once and handed to the
-// modules that depend on it.
-type services struct {
-	tokens   *authn.Tokens
-	users    *user.Service
-	outlets  *outlet.Service
-	menus    *menu.Service
-	devices  *device.Service
-	tables   *table.Service
-	vouchers *voucher.Service
-	orders   *order.Service
-	auth     *auth.Service
+// app is every service, each built once and handed to the services and
+// controllers that depend on it.
+type app struct {
+	tokens     *jwt.Tokens
+	roles      *services.RoleService
+	staff      *services.StaffService
+	outlets    *services.OutletService
+	categories *services.CategoryService
+	menus      *services.MenuService
+	stock      *services.StockService
+	devices    *services.DeviceService
+	areas      *services.AreaService
+	layouts    *services.LayoutService
+	tables     *services.TableService
+	schedules  *services.ScheduleService
+	modes      *services.DineInModeService
+	vouchers   *services.VoucherService
+	pos        *services.PosService
+	checkout   *services.CheckoutService
+	orders     *services.OrderService
+	auth       *services.AuthService
 }
 
-func newServices(cfg config.Config, logger *slog.Logger, pool *pgxpool.Pool) (services, error) {
-	tokens, err := authn.NewTokens([]byte(cfg.JWTSecret), auth.AccessTokenTTL)
+func newApp(cfg config.Config, logger *slog.Logger, pool *pgxpool.Pool) (app, error) {
+	tokens, err := jwt.NewTokens([]byte(cfg.JWTSecret), services.AccessTokenTTL)
 	if err != nil {
-		return services{}, err
+		return app{}, err
 	}
 	// At most 4 argon2id hashes at once: 4 × 64 MiB during a burst of
 	// sign-ins, however many arrive.
 	hasher := password.NewHasher(password.Default, 4)
-	users := user.NewService(pool, hasher, audit.Recorder{}, auth.Sessions{})
-	payments := payment.NewService(pool)
-	outlets := outlet.NewService(pool, users, payments, order.Records{}, audit.Recorder{})
-	menus := menu.NewService(pool, users, audit.Recorder{})
-	devices := device.NewService(pool, users, audit.Recorder{})
-	tables := table.NewService(pool, outlets, order.Records{}, users, audit.Recorder{})
-	vouchers := voucher.NewService(pool, outlets, devices, order.Records{}, audit.Recorder{})
-	return services{
-		tokens:   tokens,
-		users:    users,
-		outlets:  outlets,
-		menus:    menus,
-		devices:  devices,
-		tables:   tables,
-		vouchers: vouchers,
-		orders:   order.NewService(pool, menus, devices, payments, outlets, users, vouchers, tables, audit.Recorder{}),
-		auth:     auth.NewService(pool, users, outlets, tokens, hasher, audit.Recorder{}, logger),
+	db := config.NewDatabase(pool)
+	auditor := services.NewAuditService(repositories.NewAuditRepository(db))
+	userRepo, roleRepo := repositories.NewUserRepository(db), repositories.NewRoleRepository(db)
+	sessions := repositories.NewSessionRepository(db)
+	users := services.NewUserService(userRepo, hasher)
+	roles := services.NewRoleService(db, roleRepo, auditor)
+	payments := services.NewPaymentService(repositories.NewPaymentRepository(db))
+	orderRepo := repositories.NewOrderRepository(db)
+	outlets := services.NewOutletService(db, repositories.NewOutletRepository(db), users, roles, payments, orderRepo, auditor)
+	menuRepo, categoryRepo, stockRepo := repositories.NewMenuRepository(db), repositories.NewCategoryRepository(db), repositories.NewStockRepository(db)
+	menus := services.NewMenuService(db, menuRepo, categoryRepo, stockRepo, auditor)
+	devices := services.NewDeviceService(db, repositories.NewDeviceRepository(db), users, auditor)
+	areaRepo, tableRepo := repositories.NewAreaRepository(db), repositories.NewTableRepository(db)
+	modes := services.NewDineInModeService(db, repositories.NewDineInModeRepository(db), auditor)
+	tables := services.NewTableService(db, tableRepo, areaRepo, modes, outlets, orderRepo, auditor, time.Now)
+	vouchers := services.NewVoucherService(db, repositories.NewVoucherRepository(db), outlets, devices, orderRepo, auditor, time.Now)
+	orders := services.NewOrderService(db, orderRepo, menus, outlets, users, vouchers, auditor, time.Now)
+	return app{
+		tokens:     tokens,
+		roles:      roles,
+		staff:      services.NewStaffService(db, userRepo, roleRepo, hasher, auditor, sessions),
+		outlets:    outlets,
+		categories: services.NewCategoryService(db, categoryRepo, auditor),
+		menus:      menus,
+		stock:      services.NewStockService(db, menuRepo, stockRepo, users, auditor),
+		devices:    devices,
+		areas:      services.NewAreaService(db, areaRepo, auditor),
+		layouts:    services.NewLayoutService(db, areaRepo, tableRepo, tables, auditor),
+		tables:     tables,
+		schedules:  services.NewScheduleService(db, repositories.NewScheduleRepository(db), tableRepo, users, auditor, time.Now),
+		modes:      modes,
+		vouchers:   vouchers,
+		pos:        services.NewPosService(orderRepo, menus, devices, payments, outlets, modes, time.Now),
+		checkout: services.NewCheckoutService(db, orderRepo, orders, menus, devices, payments, outlets, vouchers, tables,
+			modes, auditor, time.Now),
+		orders: orders,
+		auth: services.NewAuthService(db, sessions, services.NewAuthTokenService(repositories.NewAuthTokenRepository(db)),
+			users, outlets, tokens, hasher, auditor),
 	}, nil
 }
 
 func serve(ctx context.Context, cfg config.Config, logger *slog.Logger, pool *pgxpool.Pool) error {
-	svc, err := newServices(cfg, logger, pool)
+	svc, err := newApp(cfg, logger, pool)
 	if err != nil {
 		return err
 	}
 
-	router, err := newRouter(cfg, logger, routerDeps{
-		pinger:     pool,
-		tokens:     svc.tokens,
-		principals: svc.auth,
+	router, err := routes.New(cfg, logger, routes.Deps{
+		Pinger:     pool,
+		Tokens:     svc.tokens,
+		Principals: svc.auth,
 		// Plain-HTTP development can't set a Secure cookie on a LAN address.
-		auth:         auth.NewHandler(svc.auth, svc.tokens, logger, !cfg.IsDevelopment()),
-		outletFinder: svc.outlets,
-		outlets:      outlet.NewHandler(svc.outlets, logger),
-		users:        user.NewHandler(svc.users, logger),
-		menus:        menu.NewHandler(svc.menus, logger),
-		devices:      device.NewHandler(svc.devices, logger, !cfg.IsDevelopment()),
-		tables:       table.NewHandler(svc.tables, logger),
-		vouchers:     voucher.NewHandler(svc.vouchers, logger),
-		orders:       order.NewHandler(svc.orders, logger, !cfg.IsDevelopment()),
+		Auth:         controllers.NewAuthController(svc.auth, svc.tokens, !cfg.IsDevelopment()),
+		OutletFinder: svc.outlets,
+		Outlets:      controllers.NewOutletController(svc.outlets),
+		Roles:        controllers.NewRoleController(svc.roles),
+		Staff:        controllers.NewStaffController(svc.staff),
+		Categories:   controllers.NewCategoryController(svc.categories),
+		Menus:        controllers.NewMenuController(svc.menus),
+		Stock:        controllers.NewStockController(svc.stock),
+		Devices:      controllers.NewDeviceController(svc.devices, !cfg.IsDevelopment()),
+		Tables: routes.TableControllers{
+			Areas:     controllers.NewAreaController(svc.areas),
+			Layouts:   controllers.NewLayoutController(svc.layouts),
+			Tables:    controllers.NewTableController(svc.tables),
+			Schedules: controllers.NewScheduleController(svc.schedules),
+			Modes:     controllers.NewDineInModeController(svc.modes),
+		},
+		Vouchers: controllers.NewVoucherController(svc.vouchers),
+		Orders: routes.OrderControllers{
+			Pos:      controllers.NewPosController(svc.pos, !cfg.IsDevelopment()),
+			Checkout: controllers.NewCheckoutController(svc.checkout),
+			Orders:   controllers.NewOrderController(svc.orders),
+		},
 	})
 	if err != nil {
 		return err

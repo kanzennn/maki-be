@@ -1,4 +1,4 @@
--- The menu module's queries: menu_categories, menus and stock_movements.
+-- The menus' queries: menu_categories, menus and stock_movements.
 -- Every query names the outlet, so nothing reads across outlets.
 
 -- Categories

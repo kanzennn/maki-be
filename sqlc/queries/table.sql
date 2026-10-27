@@ -1,4 +1,4 @@
--- The table module's queries: table_areas, tables, table_schedules,
+-- The tables' queries: table_areas, tables, table_schedules,
 -- table_schedule_items and dine_in_settings. Every query names the outlet,
 -- or a row found through it, so nothing reads across outlets.
 
@@ -85,7 +85,7 @@ WHERE area_id = @area_id;
 -- name: ListTables :many
 -- The outlet's tables, or one area's, with their areas; scheduled is
 -- whether a schedule has a table out of service at the moment at. The
--- module sorts them by name as people read numbers.
+-- service sorts them by name as people read numbers.
 SELECT t.table_id, t.area_id, a.name AS area_name, a.sort_order AS area_sort_order, t.name, t.capacity,
     t.shape, t.x, t.y, t.w, t.h, t.rotation, t.is_active, t.released_at, t.created_at, t.updated_at,
     EXISTS (

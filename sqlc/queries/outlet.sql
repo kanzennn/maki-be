@@ -8,7 +8,7 @@ WHERE outlet_id = @outlet_id
 SELECT EXISTS (SELECT 1 FROM outlets WHERE outlet_id = @outlet_id AND deleted_at IS NULL);
 
 -- name: GetOutletHours :one
--- When the outlet opens and closes, for the table module.
+-- When the outlet opens and closes, for the tables.
 SELECT timezone, open_time, close_time FROM outlets
 WHERE outlet_id = @outlet_id AND deleted_at IS NULL;
 
@@ -37,7 +37,7 @@ WHERE outlet_id = @outlet_id
 FOR SHARE;
 
 -- name: ListOutletRefs :many
--- Names outlets for other modules, deleted ones too: a voucher's history
+-- Names outlets for the other services, deleted ones too: a voucher's history
 -- keeps the outlets it was used in.
 SELECT outlet_id, code, name, (deleted_at IS NOT NULL)::boolean AS deleted
 FROM outlets

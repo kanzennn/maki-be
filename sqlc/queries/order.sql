@@ -94,14 +94,14 @@ WHERE order_id = @order_id;
 UPDATE payments SET status = 'void'
 WHERE order_id = @order_id AND outlet_id = @outlet_id;
 
--- For other modules
+-- For the other services
 
 -- name: OutletHasOrders :one
 SELECT EXISTS (SELECT 1 FROM orders WHERE outlet_id = @outlet_id);
 
 -- name: ListTableSales :many
 -- The paid dine-in sales at the outlet's tables written after since, for
--- the table module: who is seated where.
+-- the tables: who is seated where.
 SELECT table_id::text AS table_id, created_at FROM orders
 WHERE outlet_id = @outlet_id AND table_id IS NOT NULL AND type = 'dine_in' AND status = 'paid'
     AND created_at > @since;

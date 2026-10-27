@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kervzent/maki-be/internal/platform/db/dbtest"
+	"github.com/kervzent/maki-be/internal/tests/dbtest"
 )
 
 // These tests check the rules the schema itself enforces, so they hold even

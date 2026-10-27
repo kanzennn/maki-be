@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
-	"github.com/kervzent/maki-be/internal/platform/db/dbtest"
+	"github.com/kervzent/maki-be/internal/tests/dbtest"
 	"github.com/kervzent/maki-be/migrations"
 )
 

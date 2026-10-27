@@ -8,19 +8,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kervzent/maki-be/internal/auth"
-	"github.com/kervzent/maki-be/internal/platform/password"
+	"github.com/kervzent/maki-be/internal/models"
+	"github.com/kervzent/maki-be/internal/utils/apperror"
+	"github.com/kervzent/maki-be/internal/utils/password"
 )
 
 type fakeOwners struct {
 	exists  bool
 	err     error
-	created *auth.OwnerInput
+	created *models.OwnerInput
 }
 
 func (f *fakeOwners) OwnerExists(context.Context) (bool, error) { return f.exists, nil }
 
-func (f *fakeOwners) CreateOwner(_ context.Context, in auth.OwnerInput) (string, error) {
+func (f *fakeOwners) CreateOwner(_ context.Context, in models.OwnerInput) (string, error) {
 	if f.err != nil {
 		return "", f.err
 	}
@@ -42,7 +43,7 @@ func TestCreateOwnerAsksAndCreates(t *testing.T) {
 	if err := createOwner(t.Context(), owners, p); err != nil {
 		t.Fatalf("createOwner: %v", err)
 	}
-	want := auth.OwnerInput{Name: "Faiz", Username: "pemilik", Email: "owner@maki.test", Password: "sandi owner panjang"}
+	want := models.OwnerInput{Name: "Faiz", Username: "pemilik", Email: "owner@maki.test", Password: "sandi owner panjang"}
 	if owners.created == nil || *owners.created != want {
 		t.Errorf("created %+v, want %+v", owners.created, want)
 	}
@@ -59,7 +60,7 @@ func TestCreateOwnerAsksAndCreates(t *testing.T) {
 func TestCreateOwnerRefusesWhenOneExists(t *testing.T) {
 	p, out := pipe("")
 	err := createOwner(t.Context(), &fakeOwners{exists: true}, p)
-	if !errors.Is(err, auth.ErrOwnerExists) || out.Len() != 0 {
+	if !errors.Is(err, apperror.ErrOwnerExists) || out.Len() != 0 {
 		t.Errorf("createOwner = %v with output %q; want ErrOwnerExists before any question", err, out)
 	}
 }

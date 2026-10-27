@@ -11,15 +11,15 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/kervzent/maki-be/internal/auth"
-	"github.com/kervzent/maki-be/internal/platform/httpx"
-	"github.com/kervzent/maki-be/internal/platform/i18n"
+	"github.com/kervzent/maki-be/internal/models"
+	"github.com/kervzent/maki-be/internal/utils/apperror"
+	"github.com/kervzent/maki-be/internal/utils/i18n"
 )
 
 // ownerCreator is the part of the auth service `api create-owner` uses.
 type ownerCreator interface {
 	OwnerExists(ctx context.Context) (bool, error)
-	CreateOwner(ctx context.Context, in auth.OwnerInput) (string, error)
+	CreateOwner(ctx context.Context, in models.OwnerInput) (string, error)
 }
 
 // prompter asks questions on out and reads the answers from in. On a
@@ -74,11 +74,11 @@ func createOwner(ctx context.Context, svc ownerCreator, p *prompter) error {
 		return err
 	}
 	if exists {
-		return auth.ErrOwnerExists
+		return apperror.ErrOwnerExists
 	}
 
 	p.printf("Create the Owner account. Password reset goes to its email, which gets a link to confirm it.\n")
-	var in auth.OwnerInput
+	var in models.OwnerInput
 	if in.Name, err = p.line("Name: "); err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func createOwner(ctx context.Context, svc ownerCreator, p *prompter) error {
 
 	if _, err := svc.CreateOwner(ctx, in); err != nil {
 		// Password rules come back as API errors; say them in words.
-		if coded, ok := errors.AsType[*httpx.Error](err); ok {
+		if coded, ok := errors.AsType[*apperror.Error](err); ok {
 			return errors.New(i18n.For("en").Error(coded.Code(), coded.Details()))
 		}
 		return err

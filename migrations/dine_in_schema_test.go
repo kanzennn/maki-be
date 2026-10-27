@@ -3,7 +3,7 @@ package migrations_test
 import (
 	"testing"
 
-	"github.com/kervzent/maki-be/internal/platform/db/dbtest"
+	"github.com/kervzent/maki-be/internal/tests/dbtest"
 )
 
 func TestDineInSettingsRules(t *testing.T) {
