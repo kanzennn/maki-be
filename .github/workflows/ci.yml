@@ -1,42 +1,32 @@
-# maki-be's pipeline (spec, Infra & deploy): lint and test on every push and
-# pull request; on main, the image to GitHub's registry, then the deploy to
-# the VPS over SSH, its migrations before the new version starts.
+# maki-be's CI/CD (spec, Infra & deploy): on every push to main, the tests,
+# then the image to GitHub's registry, then the deploy to the server over
+# SSH, its migrations before the new version starts.
 #
 # The deploy waits until the repository's DEPLOY_ENABLED variable is true;
-# the production environment holds its server and secrets, and can ask for
-# an approval first. docs/deployment.md sets them up.
-name: maki-be
+# everything before it runs without any secret. docs/deployment.md sets the
+# server and the repository's secrets up.
+name: CI/CD
 
 on:
   push:
     branches: [main]
-  pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
+  packages: write
 
+# One run at a time, in the order of the pushes, so a deploy never lands
+# after a newer one; a run still waiting gives way to a newer push.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # A pull request's older runs stop; main's run to the end, deploy included.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  # A registry name is lowercase, as this repository's is.
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-      - name: go vet
-        run: go vet ./...
-      - name: golangci-lint
-        # The Makefile's version.
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run
-      - name: The generated store code matches the queries
-        run: docker run --rm -v "$PWD:/src" -w /src/sqlc sqlc/sqlc:1.31.1 diff
-
   test:
     runs-on: ubuntu-latest
     services:
@@ -56,88 +46,101 @@ jobs:
       # With CI set, the integration tests fail rather than skip without it.
       TEST_DATABASE_URL: postgres://maki:maki@localhost:5432/maki?sslmode=disable
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - name: go test
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint
+        # The Makefile's version.
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run
+
+      - name: The generated store code matches the queries
+        run: docker run --rm -v "$PWD:/src" -w /src/sqlc sqlc/sqlc:1.31.1 diff
+
+      - name: Test
         # -count=1: setup-go restores Go's cache, test results included, and
         # a cached result stands in for a run while the code is unchanged;
         # the integration tests would then never reach this database.
         run: go test -count=1 ./...
 
-  image:
-    needs: [lint, test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Build
+        run: go build ./...
+
+  build-and-push:
+    needs: test
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      image: ${{ steps.name.outputs.image }}
     steps:
-      - uses: actions/checkout@v7
-      - name: The image's name
-        id: name
-        # A registry name is lowercase; an owner's may not be.
-        run: |
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "image=ghcr.io/$owner/maki-be:$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-          echo "latest=ghcr.io/$owner/maki-be:latest" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
+          # The job's own token may push too, while CR_PAT isn't set.
+          password: ${{ secrets.CR_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           tags: |
-            ${{ steps.name.outputs.image }}
-            ${{ steps.name.outputs.latest }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   deploy:
-    needs: image
+    needs: build-and-push
     if: vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
-    environment: production
-    permissions:
-      contents: read
-      packages: read
-    concurrency:
-      group: production
-      cancel-in-progress: false
-    env:
-      HOST: ${{ vars.DEPLOY_HOST }}
-      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
-      IMAGE: ${{ needs.image.outputs.image }}
     steps:
-      - uses: actions/checkout@v7
-      - name: The server's key
-        env:
-          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy
-          chmod 600 ~/.ssh/deploy
-          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
-          printf 'Host deploy\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/deploy\n  BatchMode yes\n' \
-            "$HOST" "$DEPLOY_USER" > ~/.ssh/config
-      - name: The stack's files
-        # .env and backup.env stay on the server; only their templates go.
-        run: |
-          scp deploy/compose.yaml deploy/Caddyfile deploy/deploy.sh deploy/backup.sh \
-            deploy/.env.example deploy/backup.env.example deploy:/srv/maki/
-      - name: Deploy
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          # The job's own token, through stdin: nothing long-lived on the server.
-          printf '%s' "$TOKEN" | ssh deploy "docker login ghcr.io -u '$ACTOR' --password-stdin"
-          ssh deploy "sh /srv/maki/deploy.sh '$IMAGE'; status=\$?; docker logout ghcr.io; exit \$status"
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Copy the stack's files to the server
+        # Into DEPLOY_PATH, /srv/maki. .env and backup.env stay on the server;
+        # only their templates go.
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          # The server's host key. Without it, the files go to whichever host
+          # answers at SSH_HOST.
+          fingerprint: ${{ secrets.SSH_FINGERPRINT }}
+          source: deploy/compose.yaml,deploy/Caddyfile,deploy/deploy.sh,deploy/backup.sh,deploy/.env.example,deploy/backup.env.example
+          target: ${{ secrets.DEPLOY_PATH }}
+          strip_components: 1
+          overwrite: true
+
+      - name: Deploy to server via SSH
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          fingerprint: ${{ secrets.SSH_FINGERPRINT }}
+          # deploy.sh pulls this commit's image, applies its migrations while
+          # the running api still serves, starts the api and the worker from
+          # it, and waits until the api is ready. The image is public, so the
+          # server pulls it without signing in.
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            sh deploy.sh ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            docker image prune -f

@@ -43,9 +43,9 @@ On Windows without `make`, run the command from the `Makefile` directly
 
 ## CI/CD and deployment
 
-`.github/workflows/ci.yml` lints and tests every push and pull request, and
-from `main` pushes the image (`Dockerfile`, `docker build -t maki-be .`) and
-deploys it to the VPS once deploys are enabled. The production stack is in
+`.github/workflows/ci.yml` (CI/CD) runs on every push to `main`: the tests,
+then the image to GHCR (`Dockerfile`, `docker build -t maki-be .`), then, once
+deploys are enabled, the deploy to the VPS over SSH. The production stack is in
 `deploy/`; [docs/deployment.md](docs/deployment.md) sets it all up.
 
 ## Structure

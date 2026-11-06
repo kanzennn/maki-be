@@ -21,7 +21,7 @@ PostgreSQL 18, outside the stack:
 | `pg` | `pg_dump` and `pg_restore` for the backups; in the `tools` profile, so only ever `compose run` | `postgres:18` |
 
 The web app and the API share one domain, as maki-fe expects
-(`VITE_API_ORIGIN` empty): `/api/*`, `/healthz` and `/readyz` go to the api,
+(`VITE_API_BASE_URL` empty): `/api/*`, `/healthz` and `/readyz` go to the api,
 `/assets/*` are the web app's hashed files (cached for good, a missing one a
 404), and anything else is its files or, for a client-side route,
 `index.html` (`no-cache`, so a deploy shows at once). maki-fe's deploy puts
@@ -55,19 +55,23 @@ in lowercase.
 
 ## The pipeline
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml), one pipeline for
-the repository:
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml), **CI/CD**, runs
+on every push to `main`, its three jobs one after the other:
 
-| Job | When | What |
-| --- | --- | --- |
-| `lint` | every push and pull request | `go vet`, golangci-lint (the Makefile's version), and `sqlc diff`: the store code is what sqlc makes of the queries |
-| `test` | every push and pull request | `go test -count=1 ./...` (never a result from the cache setup-go restores) against a PostgreSQL 18 service, production's version, `TEST_DATABASE_URL` set; with `CI` set, the integration tests fail rather than skip without it (standard §12) |
-| `image` | a push to `main`, both passing | builds the image, pushes it to GHCR |
-| `deploy` | after `image`, when the repository variable `DEPLOY_ENABLED` is `true` | through the `production` environment: copies the stack's files to `/srv/maki`, logs the server into GHCR with the job's own token (through stdin, logged out after), and runs `deploy.sh` with the new image |
+| Job | What |
+| --- | --- |
+| `test` | `go vet`, golangci-lint (the Makefile's version), `sqlc diff` (the store code is what sqlc makes of the queries), `go test -count=1 ./...` (never a result from the cache setup-go restores) against a PostgreSQL 18 service, production's version, `TEST_DATABASE_URL` set, and `go build`. With `CI` set, the integration tests fail rather than skip without the database (standard §12) |
+| `build-and-push` | builds the image and pushes it to GHCR as `ghcr.io/<owner>/maki-be:latest` and `:<commit>`, signed in with `CR_PAT`, or the job's own token while that secret isn't set |
+| `deploy` | when the repository variable `DEPLOY_ENABLED` is `true`: copies the stack's files to `DEPLOY_PATH` (`appleboy/scp-action`), then over SSH (`appleboy/ssh-action`) runs `deploy.sh` with the commit's image ([below](#a-deploy-step-by-step)) and prunes the images nothing uses any more |
 
-Until `DEPLOY_ENABLED` is `true` the deploy is skipped, and everything
-before it still runs. A pull request's older runs stop when a new push
-comes; `main`'s always run to the end, and one deploy waits for another.
+Until `DEPLOY_ENABLED` is `true` the deploy is skipped, and everything before
+it still runs, without any secret. One run goes at a time, in the order of
+the pushes, so a deploy never lands after a newer one; a run still waiting gives way to a newer push. The
+deploy names the commit's image, never `:latest`, so running an older run's
+jobs again deploys that commit. The image's package is public, as the
+repository is, so the server pulls it without signing in; a private package
+needs the deploy user signed in to `ghcr.io` once, with a token that may
+read packages.
 
 ## Setting it up, once
 
@@ -76,10 +80,11 @@ comes; `main`'s always run to the end, and one deploy waits for another.
 1. A VPS (Debian or Ubuntu) with Docker Engine and its Compose plugin;
    ports 22, 80 and 443 open, nothing else. A port Docker publishes skips
    the host's firewall, which is why Caddy's is on the loopback only.
-2. The deploy user (`DEPLOY_USER`), in the `docker` group, signing in by key
+2. The deploy user (`SSH_USER` in maki-be, `DEPLOY_USER` in maki-fe), in
+   the `docker` group, signing in by key
    only, who can read the shared PostgreSQL's env file for Maki (5.): the
    user who owns the shared setup is the simplest.
-3. `/srv/maki`, owned by that user.
+3. `/srv/maki` (`DEPLOY_PATH`), owned by that user.
 4. The domain's DNS A (and AAAA) record pointing at the server.
 5. **In the shared PostgreSQL 18:** a `maki` database owned by a `maki`
    role, so that `api migrate` can create its tables, and the setup's env
@@ -144,26 +149,41 @@ takes it from private addresses only (`TRUSTED_PROXIES`, below).
 ### GitHub
 
 The three repositories, `maki-be`, `maki-fe` and `maki-mobile`, under one
-account. In `maki-be` and `maki-fe` alike:
+account. **In `maki-be`**, the repository's secrets (Settings → Secrets and
+variables → Actions):
+
+| Secret | What |
+| --- | --- |
+| `CR_PAT` | A personal access token (classic) with `write:packages`, which pushes the image to GHCR. Without it, the job's own token does |
+| `SSH_HOST`, `SSH_PORT` | The server, and its SSH port (`22`) |
+| `SSH_USER` | The deploy user |
+| `SSH_PRIVATE_KEY` | The private key of a key pair made for the pipelines (`ssh-keygen -t ed25519`), its public half in the deploy user's `authorized_keys` |
+| `SSH_FINGERPRINT` | The server's host key, `SHA256:…` from `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server, compared with what `ssh-keyscan -t ed25519 <host> \| ssh-keygen -lf -` shows from outside. Without it the deploy connects to whichever host answers at `SSH_HOST` |
+| `DEPLOY_PATH` | `/srv/maki`, the stack's directory: maki-fe puts the web app's files in its `web/` |
+
+Then the repository variable `DEPLOY_ENABLED` (Settings → Secrets and
+variables → Actions → Variables), `true` once the secrets are set and the
+server is ready.
+
+**In `maki-fe`**, its deploy still runs in an environment:
 
 | Setting | Where | What |
 | --- | --- | --- |
 | `production` | Settings → Environments | The environment the deploys run in. Required reviewers there make each deploy wait for an approval |
 | `DEPLOY_HOST`, `DEPLOY_USER` | variables of `production` | The server, and the deploy user |
-| `DEPLOY_SSH_KEY` | secrets of `production` | The private key of a key pair made for the pipelines (`ssh-keygen -t ed25519`), its public half in `deploy`'s `authorized_keys` |
+| `DEPLOY_SSH_KEY` | secrets of `production` | The pipelines' private key, as `SSH_PRIVATE_KEY` above |
 | `DEPLOY_KNOWN_HOSTS` | secrets of `production` | The server's host key line, from `ssh-keyscan -t ed25519 <host>`, checked against the fingerprint the server shows |
 | `DEPLOY_ENABLED` | Settings → Variables (repository) | `true` once the above is done |
 
 In `maki-fe` and `maki-mobile`, when `maki-be` is private: the secret
 `MAKI_BE_TOKEN`, a fine-grained token that may read `maki-be`'s contents,
-for their pipelines' checkout of it. The image's package on GHCR is private
-with a private repository; the deploy logs in with the job's own token.
+for their pipelines' checkout of it.
 
 ### The first deploy
 
-1. A push to `main` of `maki-be` (or **Run workflow**): the image, then
-   `deploy.sh`, which creates the tables in the shared PostgreSQL's `maki`
-   database.
+1. A push to `main` of `maki-be` once its secrets and `DEPLOY_ENABLED` are
+   set (or **Re-run all jobs** on its last run): the image, then `deploy.sh`, which creates the
+   tables in the shared PostgreSQL's `maki` database.
 2. On the server, the Owner, once:
 
    ```sh
@@ -284,8 +304,10 @@ docker rm -f maki-restore-test
       `curl -sI https://<domain>/`.
 - [ ] The backup's cron line in place, one backup in the bucket, and a
       restore tested.
-- [ ] The `production` environment's reviewers, if deploys should wait for
-      an approval.
+- [ ] maki-be's deploy secrets set, `SSH_FINGERPRINT` among them, and its
+      `DEPLOY_ENABLED` `true`; in
+      maki-fe, the `production` environment's reviewers, if its deploys
+      should wait for an approval.
 - [ ] The server: key-only SSH, the firewall, automatic security updates.
 
 ## Not covered yet
