@@ -32,15 +32,16 @@ type StaffService struct {
 	hasher   *password.Hasher
 	audit    *AuditService
 	sessions *repositories.SessionRepository
+	media    *MediaService
 }
 
 // NewStaffService returns the staff accounts' service. hasher hashes the
 // passwords it sets; sessions are the ones it ends when an account changes
-// wholesale.
+// wholesale. media is nil-safe: see MediaService.
 func NewStaffService(db *config.Database, users *repositories.UserRepository, roles *repositories.RoleRepository,
-	hasher *password.Hasher, audit *AuditService, sessions *repositories.SessionRepository,
+	hasher *password.Hasher, audit *AuditService, sessions *repositories.SessionRepository, media *MediaService,
 ) *StaffService {
-	return &StaffService{db: db, users: users, roles: roles, hasher: hasher, audit: audit, sessions: sessions}
+	return &StaffService{db: db, users: users, roles: roles, hasher: hasher, audit: audit, sessions: sessions, media: media}
 }
 
 // ListStaff returns a page of the outlet's users, by name, and how many
@@ -71,6 +72,11 @@ func (s *StaffService) CreateStaff(ctx context.Context, p models.Principal, ip, 
 	if err := password.Check(in.Password, profile.Username); err != nil {
 		return models.Staff{}, err
 	}
+	if in.UploadKey != nil {
+		if err := s.media.CheckUpload(ctx, *in.UploadKey); err != nil {
+			return models.Staff{}, err
+		}
+	}
 	hash, err := s.hasher.Hash(ctx, in.Password)
 	if err != nil {
 		return models.Staff{}, err
@@ -96,6 +102,12 @@ func (s *StaffService) CreateStaff(ctx context.Context, p models.Principal, ip, 
 			}
 			after["role_id"] = *in.RoleID
 		}
+		if in.UploadKey != nil {
+			if err := s.media.QueueUserPhoto(ctx, userID, *in.UploadKey); err != nil {
+				return err
+			}
+			after["photo"] = imageNew
+		}
 		return s.audit.Record(ctx, models.AuditEntry{
 			Action: "user.created", UserID: p.UserID, OutletID: outletID,
 			TargetType: "user", TargetID: userID, After: after, IP: ip,
@@ -107,6 +119,27 @@ func (s *StaffService) CreateStaff(ctx context.Context, p models.Principal, ip, 
 	return s.Staff(ctx, outletID, userID)
 }
 
+// changePhoto starts on the account's new photo, or takes it away, as asked.
+func (s *StaffService) changePhoto(ctx context.Context, p models.Principal, ip, outletID, userID string, in models.StaffInput) error {
+	entry := models.AuditEntry{UserID: p.UserID, OutletID: outletID, TargetType: "user", TargetID: userID, IP: ip}
+	switch {
+	case in.UploadKey != nil:
+		if err := s.media.QueueUserPhoto(ctx, userID, *in.UploadKey); err != nil {
+			return err
+		}
+		entry.Action = "user.photo_changed"
+	case in.RemovePhoto:
+		removed, err := s.media.RemoveUserPhoto(ctx, userID)
+		if err != nil || !removed {
+			return err
+		}
+		entry.Action = "user.photo_removed"
+	default:
+		return nil
+	}
+	return s.audit.Record(ctx, entry)
+}
+
 // UpdateStaff changes an account's name, email and phone, and its role or
 // rank. Only the Owner changes a Manager account, or makes a staff member a
 // Manager; that, and making a Manager staff again, ends the user's sessions.
@@ -114,6 +147,11 @@ func (s *StaffService) UpdateStaff(ctx context.Context, p models.Principal, ip, 
 	next, err := validations.CheckStaff(in, false)
 	if err != nil {
 		return models.Staff{}, err
+	}
+	if in.UploadKey != nil {
+		if err := s.media.CheckUpload(ctx, *in.UploadKey); err != nil {
+			return models.Staff{}, err
+		}
 	}
 	err = s.db.InTx(ctx, func(ctx context.Context) error {
 		target, err := s.users.LockStaff(ctx, outletID, userID)
@@ -135,6 +173,9 @@ func (s *StaffService) UpdateStaff(ctx context.Context, p models.Principal, ip, 
 		}
 
 		if err := s.updateProfile(ctx, p, ip, outletID, target, next); err != nil {
+			return err
+		}
+		if err := s.changePhoto(ctx, p, ip, outletID, target.UserID, in); err != nil {
 			return err
 		}
 		prevRole, err := s.users.RoleOf(ctx, target.UserID)

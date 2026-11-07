@@ -19,9 +19,11 @@ import (
 	"github.com/kervzent/maki-be/internal/jobs"
 	"github.com/kervzent/maki-be/internal/repositories"
 	"github.com/kervzent/maki-be/internal/services"
+	"github.com/kervzent/maki-be/internal/utils/imaging"
 	"github.com/kervzent/maki-be/internal/utils/mail"
 	"github.com/kervzent/maki-be/internal/utils/outbox"
 	"github.com/kervzent/maki-be/internal/utils/password"
+	"github.com/kervzent/maki-be/internal/utils/storage"
 )
 
 func main() {
@@ -75,7 +77,20 @@ func run() error {
 	jobs.NewAuthJobs(users, outlets, services.NewAuthTokenService(repositories.NewAuthTokenRepository(db)),
 		mailer, cfg.WebBaseURL).Register(worker)
 
-	logger.Info("worker started", slog.String("env", cfg.Env), slog.Bool("smtp", cfg.SMTP.Host != ""))
+	// Without a storage no photo job can exist: the api refuses uploads.
+	if public, private := storage.Open(cfg.Storage); private != nil {
+		if !imaging.Available {
+			logger.Warn("this worker is built without libvips: photos won't be processed; use the worker's image")
+		}
+		imaging.Start()
+		defer imaging.Stop()
+		media := services.NewMediaService(db, repositories.NewMenuRepository(db), repositories.NewUserRepository(db), auditor, private)
+		mediaJobs := jobs.NewMediaJobs(media, public, private, imaging.Converter{}, logger)
+		mediaJobs.Register(worker)
+		go mediaJobs.RunSweeper(ctx)
+	}
+
+	logger.Info("worker started", slog.String("env", cfg.Env), slog.Bool("smtp", cfg.SMTP.Host != ""), slog.Bool("storage", cfg.Storage.Enabled()))
 	worker.Run(ctx)
 	logger.Info("worker stopped")
 	return nil

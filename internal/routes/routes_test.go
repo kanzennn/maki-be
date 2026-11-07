@@ -16,6 +16,7 @@ import (
 	"github.com/kervzent/maki-be/internal/controllers"
 	"github.com/kervzent/maki-be/internal/models"
 	"github.com/kervzent/maki-be/internal/utils/jwt"
+	"github.com/kervzent/maki-be/internal/utils/realtime"
 )
 
 func TestMain(m *testing.M) {
@@ -42,6 +43,7 @@ func testDeps(t *testing.T) Deps {
 	if err != nil {
 		t.Fatal(err)
 	}
+	hub := realtime.NewHub(time.Now)
 	return Deps{
 		Pinger:     okPinger{},
 		Tokens:     tokens,
@@ -55,6 +57,11 @@ func testDeps(t *testing.T) Deps {
 		Stock:      controllers.NewStockController(nil),
 		Devices:    controllers.NewDeviceController(nil, true),
 		Vouchers:   controllers.NewVoucherController(nil),
+		Payments:   controllers.NewPaymentController(nil),
+		Logs:       controllers.NewLogController(nil),
+		Dashboards: controllers.NewDashboardController(nil),
+		Realtime:   controllers.NewRealtimeController(hub, slog.New(slog.DiscardHandler), nil),
+		Changes:    hub,
 		Orders: OrderControllers{
 			Pos: controllers.NewPosController(nil, true), Checkout: controllers.NewCheckoutController(nil),
 			Orders: controllers.NewOrderController(nil),

@@ -20,6 +20,7 @@ type (
 		Password  string  `json:"password" binding:"required,max=1024"`
 		RoleID    *string `json:"role_id" binding:"omitempty,max=32"`
 		IsManager bool    `json:"is_manager"`
+		UploadKey *string `json:"upload_key" binding:"omitempty,max=64"`
 	}
 
 	// UpdateStaffRequest is the body of PUT.
@@ -29,6 +30,9 @@ type (
 		Phone     *string `json:"phone" binding:"omitempty,max=128"`
 		RoleID    *string `json:"role_id" binding:"omitempty,max=32"`
 		IsManager bool    `json:"is_manager"`
+		UploadKey *string `json:"upload_key" binding:"omitempty,max=64"`
+		// RemovePhoto takes the account's photo away.
+		RemovePhoto bool `json:"remove_photo"`
 	}
 
 	// StaffStatusRequest is the body of PATCH .../status.

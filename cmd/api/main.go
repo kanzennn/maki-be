@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -37,6 +38,8 @@ import (
 	"github.com/kervzent/maki-be/internal/services"
 	"github.com/kervzent/maki-be/internal/utils/jwt"
 	"github.com/kervzent/maki-be/internal/utils/password"
+	"github.com/kervzent/maki-be/internal/utils/realtime"
+	"github.com/kervzent/maki-be/internal/utils/storage"
 )
 
 const usage = `usage:
@@ -98,7 +101,12 @@ func run(args []string) error {
 
 // app is every service, each built once and handed to the services and
 // controllers that depend on it.
+// photoURLTTL is how long a profile photo's signed address works: long enough
+// for a page left open, short enough to stay private.
+const photoURLTTL = time.Hour
+
 type app struct {
+	media      *services.MediaService
 	tokens     *jwt.Tokens
 	roles      *services.RoleService
 	staff      *services.StaffService
@@ -113,6 +121,9 @@ type app struct {
 	schedules  *services.ScheduleService
 	modes      *services.DineInModeService
 	vouchers   *services.VoucherService
+	payments   *services.PaymentControlService
+	logs       *services.LogService
+	dashboards *services.DashboardService
 	pos        *services.PosService
 	checkout   *services.CheckoutService
 	orders     *services.OrderService
@@ -129,25 +140,38 @@ func newApp(cfg config.Config, logger *slog.Logger, pool *pgxpool.Pool) (app, er
 	hasher := password.NewHasher(password.Default, 4)
 	db := config.NewDatabase(pool)
 	auditor := services.NewAuditService(repositories.NewAuditRepository(db))
+	public, private := storage.Open(cfg.Storage)
 	userRepo, roleRepo := repositories.NewUserRepository(db), repositories.NewRoleRepository(db)
+	menuRepo := repositories.NewMenuRepository(db)
+	if private != nil {
+		userRepo.WithPhotoURLs(func(ctx context.Context, key string) (string, error) {
+			return private.PresignGet(ctx, key, photoURLTTL)
+		})
+		menuRepo.WithImageURLs(public.URL)
+	}
+	media := services.NewMediaService(db, menuRepo, userRepo, auditor, private)
 	sessions := repositories.NewSessionRepository(db)
 	users := services.NewUserService(userRepo, hasher)
 	roles := services.NewRoleService(db, roleRepo, auditor)
-	payments := services.NewPaymentService(repositories.NewPaymentRepository(db))
+	paymentRepo := repositories.NewPaymentRepository(db)
+	payments := services.NewPaymentService(paymentRepo)
 	orderRepo := repositories.NewOrderRepository(db)
-	outlets := services.NewOutletService(db, repositories.NewOutletRepository(db), users, roles, payments, orderRepo, auditor)
-	menuRepo, categoryRepo, stockRepo := repositories.NewMenuRepository(db), repositories.NewCategoryRepository(db), repositories.NewStockRepository(db)
-	menus := services.NewMenuService(db, menuRepo, categoryRepo, stockRepo, auditor)
-	devices := services.NewDeviceService(db, repositories.NewDeviceRepository(db), users, auditor)
+	outletRepo := repositories.NewOutletRepository(db)
+	outlets := services.NewOutletService(db, outletRepo, users, roles, payments, orderRepo, auditor)
+	categoryRepo, stockRepo := repositories.NewCategoryRepository(db), repositories.NewStockRepository(db)
+	menus := services.NewMenuService(db, menuRepo, categoryRepo, stockRepo, auditor, media)
+	deviceRepo := repositories.NewDeviceRepository(db)
+	devices := services.NewDeviceService(db, deviceRepo, users, auditor)
 	areaRepo, tableRepo := repositories.NewAreaRepository(db), repositories.NewTableRepository(db)
 	modes := services.NewDineInModeService(db, repositories.NewDineInModeRepository(db), auditor)
 	tables := services.NewTableService(db, tableRepo, areaRepo, modes, outlets, orderRepo, auditor, time.Now)
 	vouchers := services.NewVoucherService(db, repositories.NewVoucherRepository(db), outlets, devices, orderRepo, auditor, time.Now)
 	orders := services.NewOrderService(db, orderRepo, menus, outlets, users, vouchers, auditor, time.Now)
 	return app{
+		media:      media,
 		tokens:     tokens,
 		roles:      roles,
-		staff:      services.NewStaffService(db, userRepo, roleRepo, hasher, auditor, sessions),
+		staff:      services.NewStaffService(db, userRepo, roleRepo, hasher, auditor, sessions, media),
 		outlets:    outlets,
 		categories: services.NewCategoryService(db, categoryRepo, auditor),
 		menus:      menus,
@@ -159,6 +183,9 @@ func newApp(cfg config.Config, logger *slog.Logger, pool *pgxpool.Pool) (app, er
 		schedules:  services.NewScheduleService(db, repositories.NewScheduleRepository(db), tableRepo, users, auditor, time.Now),
 		modes:      modes,
 		vouchers:   vouchers,
+		payments:   services.NewPaymentControlService(db, paymentRepo, auditor),
+		logs:       services.NewLogService(repositories.NewAuditRepository(db), userRepo, deviceRepo, outlets),
+		dashboards: services.NewDashboardService(orderRepo, menuRepo, outletRepo, users, tables),
 		pos:        services.NewPosService(orderRepo, menus, devices, payments, outlets, modes, time.Now),
 		checkout: services.NewCheckoutService(db, orderRepo, orders, menus, devices, payments, outlets, vouchers, tables,
 			modes, auditor, time.Now),
@@ -174,6 +201,7 @@ func serve(ctx context.Context, cfg config.Config, logger *slog.Logger, pool *pg
 		return err
 	}
 
+	hub := realtime.NewHub(time.Now)
 	router, err := routes.New(cfg, logger, routes.Deps{
 		Pinger:     pool,
 		Tokens:     svc.tokens,
@@ -195,7 +223,13 @@ func serve(ctx context.Context, cfg config.Config, logger *slog.Logger, pool *pg
 			Schedules: controllers.NewScheduleController(svc.schedules),
 			Modes:     controllers.NewDineInModeController(svc.modes),
 		},
-		Vouchers: controllers.NewVoucherController(svc.vouchers),
+		Vouchers:   controllers.NewVoucherController(svc.vouchers),
+		Payments:   controllers.NewPaymentController(svc.payments),
+		Logs:       controllers.NewLogController(svc.logs),
+		Dashboards: controllers.NewDashboardController(svc.dashboards),
+		Realtime:   controllers.NewRealtimeController(hub, logger, originHosts(cfg.CORSAllowedOrigins)),
+		Uploads:    controllers.NewUploadController(svc.media),
+		Changes:    hub,
 		Orders: routes.OrderControllers{
 			Pos:      controllers.NewPosController(svc.pos, !cfg.IsDevelopment()),
 			Checkout: controllers.NewCheckoutController(svc.checkout),
@@ -240,4 +274,16 @@ func serve(ctx context.Context, cfg config.Config, logger *slog.Logger, pool *pg
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	return nil
+}
+
+// originHosts are the hosts of the allowed origins, as the WebSocket upgrade
+// matches them.
+func originHosts(origins []string) []string {
+	hosts := make([]string, 0, len(origins))
+	for _, origin := range origins {
+		if u, err := url.Parse(origin); err == nil && u.Host != "" {
+			hosts = append(hosts, u.Host)
+		}
+	}
+	return hosts
 }

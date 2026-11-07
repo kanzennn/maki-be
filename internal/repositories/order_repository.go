@@ -278,3 +278,107 @@ func (r *OrderRepository) TableSales(ctx context.Context, outletID string, since
 	}
 	return out, nil
 }
+
+// SalesByOutlet returns what each outlet sold in its period; an outlet without
+// an order is left out.
+func (r *OrderRepository) SalesByOutlet(ctx context.Context, p models.SalesPeriod) ([]models.OutletSales, error) {
+	rows, err := store.New(r.db.Conn(ctx)).DashboardByOutlet(ctx, store.DashboardByOutletParams(periodParams(p)))
+	if err != nil {
+		return nil, fmt.Errorf("add the outlets' sales up: %w", err)
+	}
+	out := make([]models.OutletSales, len(rows))
+	for i, row := range rows {
+		out[i] = models.OutletSales{
+			OutletID: row.OutletID, Sales: row.Sales, Transactions: int(row.Transactions),
+			VoidTotal: row.VoidTotal, VoidCount: int(row.VoidCount),
+		}
+	}
+	return out, nil
+}
+
+// ItemsSold returns how many items the paid orders of the period sold.
+func (r *OrderRepository) ItemsSold(ctx context.Context, p models.SalesPeriod) (int64, error) {
+	n, err := store.New(r.db.Conn(ctx)).DashboardItemsSold(ctx, store.DashboardItemsSoldParams(periodParams(p)))
+	if err != nil {
+		return 0, fmt.Errorf("add the items sold up: %w", err)
+	}
+	return n, nil
+}
+
+// SalesByDay returns the days of the period with a sale, in order.
+func (r *OrderRepository) SalesByDay(ctx context.Context, p models.SalesPeriod) ([]models.DaySales, error) {
+	rows, err := store.New(r.db.Conn(ctx)).DashboardByDay(ctx, store.DashboardByDayParams(periodParams(p)))
+	if err != nil {
+		return nil, fmt.Errorf("add the sales up by day: %w", err)
+	}
+	out := make([]models.DaySales, len(rows))
+	for i, row := range rows {
+		out[i] = models.DaySales{Day: row.Day, Sales: row.Sales, Transactions: int(row.Transactions)}
+	}
+	return out, nil
+}
+
+// SalesByHour returns the hours of the day with a sale in the period, in order.
+func (r *OrderRepository) SalesByHour(ctx context.Context, p models.SalesPeriod) ([]models.DaySales, error) {
+	rows, err := store.New(r.db.Conn(ctx)).DashboardByHour(ctx, store.DashboardByHourParams(periodParams(p)))
+	if err != nil {
+		return nil, fmt.Errorf("add the sales up by hour: %w", err)
+	}
+	out := make([]models.DaySales, len(rows))
+	for i, row := range rows {
+		out[i] = models.DaySales{Hour: int(row.Hour), Sales: row.Sales, Transactions: int(row.Transactions)}
+	}
+	return out, nil
+}
+
+// SalesByMethod returns what each payment method took, the most first.
+func (r *OrderRepository) SalesByMethod(ctx context.Context, p models.SalesPeriod) ([]models.MethodSales, error) {
+	rows, err := store.New(r.db.Conn(ctx)).DashboardByMethod(ctx, store.DashboardByMethodParams(periodParams(p)))
+	if err != nil {
+		return nil, fmt.Errorf("add the sales up by method: %w", err)
+	}
+	out := make([]models.MethodSales, len(rows))
+	for i, row := range rows {
+		out[i] = models.MethodSales{Method: row.Method, Amount: row.Amount, Transactions: int(row.Transactions)}
+	}
+	return out, nil
+}
+
+// TopMenus returns the ten menus that sold the most in the period.
+func (r *OrderRepository) TopMenus(ctx context.Context, p models.SalesPeriod) ([]models.MenuSales, error) {
+	rows, err := store.New(r.db.Conn(ctx)).DashboardTopMenus(ctx, store.DashboardTopMenusParams(periodParams(p)))
+	if err != nil {
+		return nil, fmt.Errorf("find the top menus: %w", err)
+	}
+	out := make([]models.MenuSales, len(rows))
+	for i, row := range rows {
+		out[i] = models.MenuSales{MenuID: row.MenuID, OutletID: row.OutletID, Name: row.Name, Qty: row.Qty, Sales: row.Sales}
+	}
+	return out, nil
+}
+
+// SalesByCashier returns what each cashier sold, named by ID only, the most
+// first.
+func (r *OrderRepository) SalesByCashier(ctx context.Context, p models.SalesPeriod) ([]models.CashierSales, error) {
+	rows, err := store.New(r.db.Conn(ctx)).DashboardByCashier(ctx, store.DashboardByCashierParams(periodParams(p)))
+	if err != nil {
+		return nil, fmt.Errorf("add the sales up by cashier: %w", err)
+	}
+	out := make([]models.CashierSales, len(rows))
+	for i, row := range rows {
+		out[i] = models.CashierSales{UserID: row.CashierID, Sales: row.Sales, Transactions: int(row.Transactions)}
+	}
+	return out, nil
+}
+
+// salesPeriodParams are the parameters each dashboard query shares.
+type salesPeriodParams struct {
+	OutletIds []string
+	Timezones []string
+	Starts    []time.Time
+	Ends      []time.Time
+}
+
+func periodParams(p models.SalesPeriod) salesPeriodParams {
+	return salesPeriodParams{OutletIds: p.OutletIDs, Timezones: p.Timezones, Starts: p.Starts, Ends: p.Ends}
+}

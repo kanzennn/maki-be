@@ -24,14 +24,18 @@ type Menu struct {
 	SKU         *string
 	Price       int64 // Rupiah
 	ImageKey    *string
-	TrackStock  bool
-	StockQty    int
-	StockAlert  *int
-	StockStatus string
-	Active      bool
-	Category    MenuCategory
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// ImageURL and ImageThumbURL are where the photo is shown from; nil
+	// without one, or without a storage to show it from.
+	ImageURL      *string
+	ImageThumbURL *string
+	TrackStock    bool
+	StockQty      int
+	StockAlert    *int
+	StockStatus   string
+	Active        bool
+	Category      MenuCategory
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // MenuCategory is the category a menu is in.
@@ -56,6 +60,10 @@ type MenuInput struct {
 	InitialStock *int
 	StockAlert   *int
 	Active       *bool
+	// UploadKey is a new photo, uploaded; RemoveImage takes the photo away.
+	// UploadKey wins if both are sent.
+	UploadKey   *string
+	RemoveImage bool
 }
 
 // MenuFilter narrows a list of menus; empty fields don't.
@@ -113,31 +121,34 @@ type MenuResponse struct {
 	Description *string `json:"description"`
 	SKU         *string `json:"sku"`
 	Price       int64   `json:"price"`
-	// The photo's CDN address, with the upload milestone; null until then.
-	ImageURL    *string              `json:"image_url"`
-	TrackStock  bool                 `json:"track_stock"`
-	StockQty    int                  `json:"stock_qty"`
-	StockAlert  *int                 `json:"stock_alert"`
-	StockStatus string               `json:"stock_status"`
-	IsActive    bool                 `json:"is_active"`
-	Category    MenuCategoryResponse `json:"category"`
-	CreatedAt   time.Time            `json:"created_at"`
-	UpdatedAt   time.Time            `json:"updated_at"`
+	// The photo on the CDN, and its small version; null without one.
+	ImageURL      *string              `json:"image_url"`
+	ImageThumbURL *string              `json:"image_thumb_url"`
+	TrackStock    bool                 `json:"track_stock"`
+	StockQty      int                  `json:"stock_qty"`
+	StockAlert    *int                 `json:"stock_alert"`
+	StockStatus   string               `json:"stock_status"`
+	IsActive      bool                 `json:"is_active"`
+	Category      MenuCategoryResponse `json:"category"`
+	CreatedAt     time.Time            `json:"created_at"`
+	UpdatedAt     time.Time            `json:"updated_at"`
 }
 
 // NewMenuResponse returns the menu's response, its times in UTC.
 func NewMenuResponse(m Menu) MenuResponse {
 	return MenuResponse{
-		MenuID:      m.MenuID,
-		Name:        m.Name,
-		Description: m.Description,
-		SKU:         m.SKU,
-		Price:       m.Price,
-		TrackStock:  m.TrackStock,
-		StockQty:    m.StockQty,
-		StockAlert:  m.StockAlert,
-		StockStatus: m.StockStatus,
-		IsActive:    m.Active,
+		MenuID:        m.MenuID,
+		Name:          m.Name,
+		Description:   m.Description,
+		SKU:           m.SKU,
+		Price:         m.Price,
+		ImageURL:      m.ImageURL,
+		ImageThumbURL: m.ImageThumbURL,
+		TrackStock:    m.TrackStock,
+		StockQty:      m.StockQty,
+		StockAlert:    m.StockAlert,
+		StockStatus:   m.StockStatus,
+		IsActive:      m.Active,
 		Category: MenuCategoryResponse{
 			CategoryID: m.Category.CategoryID, Name: m.Category.Name, Icon: m.Category.Icon, IsActive: m.Category.Active,
 		},

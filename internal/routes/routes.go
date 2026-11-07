@@ -40,6 +40,13 @@ type Deps struct {
 	Tables       TableControllers
 	Vouchers     *controllers.VoucherController
 	Orders       OrderControllers
+	Payments     *controllers.PaymentController
+	Logs         *controllers.LogController
+	Dashboards   *controllers.DashboardController
+	Realtime     *controllers.RealtimeController
+	Uploads      *controllers.UploadController
+	// Changes tells an outlet's connected clients what a request changed.
+	Changes middlewares.ChangePublisher
 }
 
 // New wires the middleware chain in the order the architecture standard
@@ -75,8 +82,9 @@ func New(cfg config.Config, logger *slog.Logger, deps Deps) (*gin.Engine, error)
 	public := r.Group("/api/v1")
 	authed := public.Group("", middlewares.Authenticate(deps.Tokens, deps.Principals, logger))
 	protected := authed.Group("", middlewares.RequirePasswordChanged())
-	owner := protected.Group("", middlewares.RequireOwner())
-	scoped := protected.Group("/outlets/:oid", middlewares.OutletScope(deps.OutletFinder, logger))
+	publish := middlewares.PublishChanges(deps.Changes, ChangeTopics)
+	owner := protected.Group("", middlewares.RequireOwner(), publish)
+	scoped := protected.Group("/outlets/:oid", middlewares.OutletScope(deps.OutletFinder, logger), publish)
 	RegisterAuthRoutes(public, authed, protected, deps.Auth)
 	RegisterOutletRoutes(owner, deps.Outlets)
 	RegisterRoleRoutes(protected, scoped, deps.Roles)
@@ -86,6 +94,11 @@ func New(cfg config.Config, logger *slog.Logger, deps Deps) (*gin.Engine, error)
 	RegisterTableRoutes(scoped, deps.Tables)
 	RegisterVoucherRoutes(owner, scoped, deps.Vouchers)
 	RegisterOrderRoutes(scoped, deps.Orders)
+	RegisterPaymentRoutes(scoped, deps.Payments)
+	RegisterLogRoutes(owner, scoped, deps.Logs)
+	RegisterDashboardRoutes(owner, scoped, deps.Dashboards)
+	RegisterRealtimeRoutes(public, scoped, deps.Realtime)
+	RegisterUploadRoutes(protected, deps.Uploads)
 
 	r.NoRoute(func(c *gin.Context) {
 		response.WriteError(c, http.StatusNotFound, "not_found")

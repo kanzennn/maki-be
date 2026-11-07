@@ -64,6 +64,16 @@ tags:
       An outlet's menu: its categories, its menus and their stock. `menu.view`
       reads it, `menu.manage` changes categories and menus, `stock.adjust`
       counts stock. The Owner reads every outlet's menu and changes none.
+  - name: payment
+    description: Payment Control, which payment methods an outlet's cashier offers.
+  - name: log
+    description: The Log Action, read back. Append-only.
+  - name: dashboard
+    description: The sales added up, for the Owner and for an outlet.
+  - name: uploads
+    description: Places to upload photos to, straight to the object storage.
+  - name: realtime
+    description: An outlet's live messages, saying what changed.
   - name: device
     description: |
       An outlet's cashier devices. The outlet's Manager activates one on the
@@ -428,6 +438,96 @@ paths:
           $ref: "#/components/responses/PasswordRejected"
         "429":
           $ref: "#/components/responses/RateLimited"
+
+  /api/v1/me/photo:
+    put:
+      operationId: setMyPhoto
+      tags: [me]
+      summary: Change the signed-in user's profile photo
+      description: |
+        Anyone may change their own photo. `upload_key` is a finished upload
+        from `POST /api/v1/uploads/presign`. The worker converts it within
+        seconds; `Me.photo_url` shows the old photo, or none, until then.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetPhotoRequest"
+      responses:
+        "202":
+          description: The worker takes it from here.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/PasswordChangeRequired"
+        "422":
+          description: |
+            The key isn't an upload's (`validation_failed`), or the upload
+            didn't finish or has expired (`upload_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+    delete:
+      operationId: removeMyPhoto
+      tags: [me]
+      summary: Remove the signed-in user's profile photo
+      responses:
+        "204":
+          description: Removed, or there was none.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/PasswordChangeRequired"
+
+  /api/v1/uploads/presign:
+    post:
+      operationId: presignUpload
+      tags: [uploads]
+      summary: Ask for a place to upload a photo to
+      description: |
+        The client then sends the file with `PUT` to `upload_url`, straight to
+        the private bucket, with the `Content-Type` it named here and exactly
+        the size it named here, both of which are signed in. It has 5 minutes.
+        It then sends `upload_key` when saving a menu or an account, or to
+        `PUT /api/v1/me/photo`. An upload nobody claims is deleted after 24
+        hours.
+
+        The worker opens the file: it must really be a JPG, PNG or WebP of at
+        most 8000 × 8000 pixels. One that isn't is logged and deleted, and
+        the row keeps the photo it has.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PresignUploadRequest"
+      responses:
+        "200":
+          description: Where to upload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadTicket"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/PasswordChangeRequired"
+        "422":
+          description: The purpose, the type or the size isn't allowed (`validation_failed`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
 
   /api/v1/me/email:
     put:
@@ -2848,6 +2948,242 @@ paths:
         "404":
           $ref: "#/components/responses/OutletNotFound"
 
+  /api/v1/outlets/{oid}/payment-methods:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listPaymentMethods
+      tags: [payment]
+      summary: The outlet's Payment Control
+      description: Needs `payment.manage`. Every method, in the cashier's order.
+      responses:
+        "200":
+          description: The methods.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentMethods"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+    put:
+      operationId: setPaymentMethods
+      tags: [payment]
+      summary: Turn the outlet's payment methods on or off
+      description: |
+        Needs `payment.manage`. Methods left out stay as they are. Cash stays
+        on (`payment_method_required`), and a method not released yet can't
+        be turned on (`payment_method_coming_soon`). A change is
+        `payment.updated` in the Log Action; saving what is so records
+        nothing. Each method's `method` is `required`, `oneof` or
+        `duplicate`, and its `is_enabled` is `required`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetPaymentMethodsRequest"
+      responses:
+        "200":
+          description: The methods, as they are now.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentMethods"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "409":
+          description: Cash turned off, or a method not released turned on.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/v1/outlets/{oid}/logs:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: listOutletLogs
+      tags: [log]
+      summary: The outlet's Log Action
+      description: Needs `log.view`. The outlet's entries alone, newest first.
+      parameters:
+        - $ref: "#/components/parameters/LogFrom"
+        - $ref: "#/components/parameters/LogTo"
+        - $ref: "#/components/parameters/LogAction"
+        - name: user_id
+          in: query
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionLogList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/v1/owner/logs:
+    get:
+      operationId: listOwnerLogs
+      tags: [log]
+      summary: The Log Action of every outlet
+      description: The Owner, with `log.view`. Every entry, newest first.
+      parameters:
+        - $ref: "#/components/parameters/LogFrom"
+        - $ref: "#/components/parameters/LogTo"
+        - $ref: "#/components/parameters/LogAction"
+        - name: outlet_ids
+          in: query
+          description: Comma-separated. Entries of these outlets alone.
+          schema:
+            type: string
+        - name: self
+          in: query
+          description: The Owner's own actions alone.
+          schema:
+            type: boolean
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: A page of entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionLogList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/v1/outlets/{oid}/dashboard:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: getOutletDashboard
+      tags: [dashboard]
+      summary: The outlet's dashboard
+      description: |
+        Needs `dashboard.view`. The dates are in the outlet's time zone. It
+        fills `hours`, `cashiers` and `tables`, and leaves `outlets` empty.
+      parameters:
+        - $ref: "#/components/parameters/DashboardFrom"
+        - $ref: "#/components/parameters/DashboardTo"
+      responses:
+        "200":
+          description: The dashboard.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dashboard"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/v1/owner/dashboard:
+    get:
+      operationId: getOwnerDashboard
+      tags: [dashboard]
+      summary: The dashboard of every outlet
+      description: |
+        The Owner, with `dashboard.view`. Each outlet's days are its own, in
+        its time zone. It fills `outlets`, the best first, and leaves `hours`,
+        `cashiers` and `tables` empty.
+      parameters:
+        - $ref: "#/components/parameters/DashboardFrom"
+        - $ref: "#/components/parameters/DashboardTo"
+        - name: outlet_ids
+          in: query
+          description: Comma-separated. These outlets alone; every outlet without it.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The dashboard.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dashboard"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/v1/outlets/{oid}/realtime/ticket:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    post:
+      operationId: createRealtimeTicket
+      tags: [realtime]
+      summary: A ticket to connect to the outlet's live messages
+      description: |
+        For whoever may act in the outlet. Good for one connection, within
+        the seconds it says.
+      responses:
+        "201":
+          description: The ticket.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RealtimeTicket"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/OutletNotFound"
+  /api/v1/outlets/{oid}/realtime:
+    parameters:
+      - $ref: "#/components/parameters/OutletID"
+    get:
+      operationId: connectRealtime
+      tags: [realtime]
+      summary: The outlet's live messages, over a WebSocket
+      security: []
+      description: |
+        A WebSocket upgrade. Each message is JSON, `{"topics": [...]}`, naming
+        what changed: `catalog` (menus, prices, stock, rates, payment
+        methods), `tables` (areas, tables, schedules, the dine-in mode) or
+        `orders` (sales and voids); the client loads that data again through
+        its usual endpoints. The server closes with code 4000 when the client
+        should connect again with a new ticket, which it does at the latest
+        after 15 minutes. A client that was away should reload everything it
+        shows when it is back.
+      parameters:
+        - name: ticket
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "101":
+          description: Connected.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /api/v1/outlets/{oid}/dine-in-mode:
     parameters:
       - $ref: "#/components/parameters/OutletID"
@@ -2994,6 +3330,42 @@ components:
       required: true
       schema:
         type: string
+    LogFrom:
+      name: from
+      in: query
+      description: From this instant.
+      schema:
+        type: string
+        format: date-time
+    LogTo:
+      name: to
+      in: query
+      description: Up to, not including, this instant, after `from`.
+      schema:
+        type: string
+        format: date-time
+    LogAction:
+      name: action
+      in: query
+      description: Comma-separated. These actions alone.
+      schema:
+        type: string
+    DashboardFrom:
+      name: from
+      in: query
+      required: true
+      description: The period's first day, included.
+      schema:
+        type: string
+        format: date
+    DashboardTo:
+      name: to
+      in: query
+      required: true
+      description: The period's last day, included; at most 366 days long.
+      schema:
+        type: string
+        format: date
     Page:
       name: page
       in: query
@@ -3479,6 +3851,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
+    StorageUnavailable:
+      description: This deployment has no object storage (`storage_unavailable`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
     RateLimited:
       description: Too many attempts (`rate_limited`). Wait `Retry-After` seconds.
       headers:
@@ -3570,6 +3948,42 @@ components:
           examples: [2592000]
         user:
           $ref: "#/components/schemas/Me"
+    PresignUploadRequest:
+      type: object
+      required: [purpose, content_type, size]
+      properties:
+        purpose:
+          type: string
+          enum: [menu_image, user_photo]
+        content_type:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        size:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 2097152
+          description: The file's exact size in bytes, at most 2 MB.
+    UploadTicket:
+      type: object
+      required: [upload_url, upload_key, expires_at]
+      properties:
+        upload_url:
+          type: string
+          description: A presigned address to `PUT` the file to.
+        upload_key:
+          type: string
+          example: uploads/tz4a98xxat96iws9zmbrgj3a
+        expires_at:
+          type: string
+          format: date-time
+    SetPhotoRequest:
+      type: object
+      required: [upload_key]
+      properties:
+        upload_key:
+          type: string
+          maxLength: 64
     Me:
       type: object
       required:
@@ -3577,6 +3991,7 @@ components:
         - username
         - name
         - email
+        - photo_url
         - email_verified
         - pending_email
         - locale
@@ -3595,6 +4010,9 @@ components:
           type: string
         name:
           type: string
+        photo_url:
+          type: [string, "null"]
+          description: A short-lived address of the photo; null without one.
         email:
           type: [string, "null"]
           format: email
@@ -3908,9 +4326,12 @@ components:
           type: string
     Staff:
       type: object
-      required: [user_id, name, username, email, phone, is_manager, role, status, must_change_password,
+      required: [user_id, name, username, email, phone, photo_url, is_manager, role, status, must_change_password,
                  last_login_at, created_at, updated_at]
       properties:
+        photo_url:
+          type: [string, "null"]
+          description: A short-lived address of the photo; null without one.
         user_id:
           type: string
         name:
@@ -3957,6 +4378,10 @@ components:
       type: object
       required: [name, username, password]
       properties:
+        upload_key:
+          type: [string, "null"]
+          maxLength: 64
+          description: A finished upload, to become the account's photo.
         name:
           type: string
           maxLength: 100
@@ -3983,6 +4408,13 @@ components:
       type: object
       required: [name]
       properties:
+        upload_key:
+          type: [string, "null"]
+          maxLength: 64
+          description: A finished upload, to become the account's photo; the old one shows until the worker is done.
+        remove_photo:
+          type: boolean
+          description: Takes the photo away. `upload_key` wins if both are sent.
         name:
           type: string
           maxLength: 100
@@ -4095,7 +4527,7 @@ components:
           type: boolean
     Menu:
       type: object
-      required: [menu_id, name, description, sku, price, image_url, track_stock, stock_qty, stock_alert,
+      required: [menu_id, name, description, sku, price, image_url, image_thumb_url, track_stock, stock_qty, stock_alert,
                  stock_status, is_active, category, created_at, updated_at]
       properties:
         menu_id:
@@ -4113,7 +4545,10 @@ components:
           example: 18000
         image_url:
           type: [string, "null"]
-          description: The photo on the CDN; null until photos arrive, and for a menu without one.
+          description: The 800 × 800 photo on the CDN; null for a menu without one.
+        image_thumb_url:
+          type: [string, "null"]
+          description: The 200 × 200 photo on the CDN; null for a menu without one.
         track_stock:
           type: boolean
         stock_qty:
@@ -4149,6 +4584,13 @@ components:
       type: object
       required: [name, category_id, price]
       properties:
+        upload_key:
+          type: [string, "null"]
+          maxLength: 64
+          description: A finished upload, to become the menu's photo; the old one shows until the worker is done.
+        remove_image:
+          type: boolean
+          description: On PUT, takes the photo away. `upload_key` wins if both are sent.
         name:
           type: string
           maxLength: 100
@@ -4305,6 +4747,308 @@ components:
           oneOf:
             - $ref: "#/components/schemas/DevicePerson"
             - type: "null"
+    PaymentControlMethod:
+      type: object
+      required: [method, is_enabled, available]
+      properties:
+        method:
+          type: string
+          enum: [cash, qris, debit]
+        is_enabled:
+          type: boolean
+        available:
+          type: boolean
+          description: False for a method not released yet, which stays off.
+    PaymentMethods:
+      type: object
+      required: [methods]
+      properties:
+        methods:
+          type: array
+          items:
+            $ref: "#/components/schemas/PaymentControlMethod"
+    SetPaymentMethodsRequest:
+      type: object
+      required: [methods]
+      properties:
+        methods:
+          type: array
+          maxItems: 10
+          items:
+            type: object
+            required: [method, is_enabled]
+            properties:
+              method:
+                type: string
+              is_enabled:
+                type: boolean
+    ActionLog:
+      type: object
+      required: [action_log_id, action, target_type, target_id, user, outlet, device, before, after, ip, occurred_at, created_at]
+      properties:
+        action_log_id:
+          type: string
+        action:
+          type: string
+          description: "`<resource>.<what happened>`, such as `menu.updated`."
+        target_type:
+          type: [string, "null"]
+        target_id:
+          type: [string, "null"]
+        user:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [user_id, name, is_owner, is_manager, role_name]
+              properties:
+                user_id:
+                  type: string
+                name:
+                  type: string
+                is_owner:
+                  type: boolean
+                is_manager:
+                  type: boolean
+                role_name:
+                  type: [string, "null"]
+        outlet:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [outlet_id, code, name]
+              properties:
+                outlet_id:
+                  type: string
+                code:
+                  type: string
+                name:
+                  type: string
+        device:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [device_id, code, name]
+              properties:
+                device_id:
+                  type: string
+                code:
+                  type: string
+                name:
+                  type: string
+        before:
+          description: The values before, as they were stored; null for none.
+          type: [object, "null"]
+          additionalProperties: true
+        after:
+          description: The values after, as they were stored; null for none.
+          type: [object, "null"]
+          additionalProperties: true
+        ip:
+          type: [string, "null"]
+        occurred_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    ActionLogList:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionLog"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+    Dashboard:
+      type: object
+      required: [from, to, previous_from, previous_to, summary, days, hours, outlets, payment_methods, top_menus, low_stock, cashiers, tables]
+      properties:
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+        previous_from:
+          type: string
+          format: date
+        previous_to:
+          type: string
+          format: date
+        summary:
+          type: object
+          description: Sales are the paid orders; voids are apart. The previous figures are the period just before, as long.
+          required: [sales, transactions, average_transaction, items_sold, void_count, void_total, previous_sales, previous_transactions]
+          properties:
+            sales:
+              type: integer
+              format: int64
+            transactions:
+              type: integer
+            average_transaction:
+              type: integer
+              format: int64
+            items_sold:
+              type: integer
+              format: int64
+            void_count:
+              type: integer
+            void_total:
+              type: integer
+              format: int64
+            previous_sales:
+              type: integer
+              format: int64
+            previous_transactions:
+              type: integer
+        days:
+          type: array
+          description: Every day of the period, those without a sale too.
+          items:
+            type: object
+            required: [date, sales, transactions]
+            properties:
+              date:
+                type: string
+                format: date
+              sales:
+                type: integer
+                format: int64
+              transactions:
+                type: integer
+        hours:
+          type: array
+          description: An outlet's, every hour of the day, 0 to 23.
+          items:
+            type: object
+            required: [hour, sales, transactions]
+            properties:
+              hour:
+                type: integer
+              sales:
+                type: integer
+                format: int64
+              transactions:
+                type: integer
+        outlets:
+          type: array
+          description: The Owner's ranking, the best first.
+          items:
+            type: object
+            required: [outlet_id, code, name, sales, transactions, previous_sales, previous_transactions]
+            properties:
+              outlet_id:
+                type: string
+              code:
+                type: string
+              name:
+                type: string
+              sales:
+                type: integer
+                format: int64
+              transactions:
+                type: integer
+              previous_sales:
+                type: integer
+                format: int64
+              previous_transactions:
+                type: integer
+        payment_methods:
+          type: array
+          items:
+            type: object
+            required: [method, amount, transactions]
+            properties:
+              method:
+                type: string
+              amount:
+                type: integer
+                format: int64
+              transactions:
+                type: integer
+        top_menus:
+          type: array
+          description: At most ten, the most sold first.
+          items:
+            type: object
+            required: [menu_id, outlet_id, name, qty, sales]
+            properties:
+              menu_id:
+                type: string
+              outlet_id:
+                type: string
+              name:
+                type: string
+              qty:
+                type: integer
+                format: int64
+              sales:
+                type: integer
+                format: int64
+        low_stock:
+          type: array
+          description: Menus at or below their alert, or out of stock, now, whatever the period. At most 50, the emptiest first.
+          items:
+            type: object
+            required: [menu_id, outlet_id, outlet_name, name, stock_qty, stock_alert, stock_status]
+            properties:
+              menu_id:
+                type: string
+              outlet_id:
+                type: string
+              outlet_name:
+                type: string
+              name:
+                type: string
+              stock_qty:
+                type: integer
+              stock_alert:
+                type: [integer, "null"]
+              stock_status:
+                type: string
+                enum: [low, out]
+        cashiers:
+          type: array
+          description: An outlet's, the most sold first.
+          items:
+            type: object
+            required: [user_id, name, sales, transactions]
+            properties:
+              user_id:
+                type: string
+              name:
+                type: string
+              sales:
+                type: integer
+                format: int64
+              transactions:
+                type: integer
+        tables:
+          type: array
+          description: An outlet's tables customers are seated at now, whatever the period.
+          items:
+            type: object
+            required: [table_id, name, area_name, orders]
+            properties:
+              table_id:
+                type: string
+              name:
+                type: string
+              area_name:
+                type: string
+              orders:
+                type: integer
+    RealtimeTicket:
+      type: object
+      required: [ticket, expires_in]
+      properties:
+        ticket:
+          type: string
+        expires_in:
+          type: integer
+          description: How many seconds it is good for.
     DeviceList:
       type: object
       required: [data, meta]
@@ -4409,7 +5153,7 @@ components:
           description: How many of the catalog's menus it holds.
     PosMenu:
       type: object
-      required: [menu_id, category_id, name, description, sku, price, image_url, track_stock, stock_qty,
+      required: [menu_id, category_id, name, description, sku, price, image_url, image_thumb_url, track_stock, stock_qty,
                  stock_alert, stock_status]
       properties:
         menu_id:
@@ -4428,7 +5172,10 @@ components:
           description: Rupiah.
         image_url:
           type: [string, "null"]
-          description: The photo's address, with the upload milestone; null until then.
+          description: The 800 × 800 photo on the CDN; null for a menu without one.
+        image_thumb_url:
+          type: [string, "null"]
+          description: The 200 × 200 photo on the CDN; null for a menu without one.
         track_stock:
           type: boolean
         stock_qty:

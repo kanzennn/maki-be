@@ -14,3 +14,22 @@ ORDER BY array_position(ARRAY['cash', 'qris', 'debit'], method);
 SELECT EXISTS (
     SELECT 1 FROM outlet_payment_methods WHERE outlet_id = @outlet_id AND method = @method AND is_enabled
 );
+
+-- name: ListMethods :many
+-- Every method and whether it is on, in the order the cashier offers them.
+SELECT method, is_enabled
+FROM outlet_payment_methods
+WHERE outlet_id = @outlet_id
+ORDER BY array_position(ARRAY['cash', 'qris', 'debit'], method);
+
+-- name: LockMethods :many
+SELECT method, is_enabled
+FROM outlet_payment_methods
+WHERE outlet_id = @outlet_id
+ORDER BY array_position(ARRAY['cash', 'qris', 'debit'], method)
+FOR UPDATE;
+
+-- name: SetMethodEnabled :exec
+UPDATE outlet_payment_methods
+SET is_enabled = @is_enabled, updated_at = now()
+WHERE outlet_id = @outlet_id AND method = @method;

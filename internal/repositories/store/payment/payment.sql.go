@@ -48,6 +48,72 @@ func (q *Queries) ListEnabledMethods(ctx context.Context, outletID string) ([]st
 	return items, nil
 }
 
+const listMethods = `-- name: ListMethods :many
+SELECT method, is_enabled
+FROM outlet_payment_methods
+WHERE outlet_id = $1
+ORDER BY array_position(ARRAY['cash', 'qris', 'debit'], method)
+`
+
+type ListMethodsRow struct {
+	Method    string
+	IsEnabled bool
+}
+
+// Every method and whether it is on, in the order the cashier offers them.
+func (q *Queries) ListMethods(ctx context.Context, outletID string) ([]ListMethodsRow, error) {
+	rows, err := q.db.Query(ctx, listMethods, outletID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMethodsRow
+	for rows.Next() {
+		var i ListMethodsRow
+		if err := rows.Scan(&i.Method, &i.IsEnabled); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockMethods = `-- name: LockMethods :many
+SELECT method, is_enabled
+FROM outlet_payment_methods
+WHERE outlet_id = $1
+ORDER BY array_position(ARRAY['cash', 'qris', 'debit'], method)
+FOR UPDATE
+`
+
+type LockMethodsRow struct {
+	Method    string
+	IsEnabled bool
+}
+
+func (q *Queries) LockMethods(ctx context.Context, outletID string) ([]LockMethodsRow, error) {
+	rows, err := q.db.Query(ctx, lockMethods, outletID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockMethodsRow
+	for rows.Next() {
+		var i LockMethodsRow
+		if err := rows.Scan(&i.Method, &i.IsEnabled); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const methodEnabled = `-- name: MethodEnabled :one
 SELECT EXISTS (
     SELECT 1 FROM outlet_payment_methods WHERE outlet_id = $1 AND method = $2 AND is_enabled
@@ -64,4 +130,21 @@ func (q *Queries) MethodEnabled(ctx context.Context, arg MethodEnabledParams) (b
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const setMethodEnabled = `-- name: SetMethodEnabled :exec
+UPDATE outlet_payment_methods
+SET is_enabled = $1, updated_at = now()
+WHERE outlet_id = $2 AND method = $3
+`
+
+type SetMethodEnabledParams struct {
+	IsEnabled bool
+	OutletID  string
+	Method    string
+}
+
+func (q *Queries) SetMethodEnabled(ctx context.Context, arg SetMethodEnabledParams) error {
+	_, err := q.db.Exec(ctx, setMethodEnabled, arg.IsEnabled, arg.OutletID, arg.Method)
+	return err
 }

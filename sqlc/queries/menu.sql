@@ -134,6 +134,19 @@ UPDATE menus SET category_id = @category_id, name = @name, description = @descri
     price = @price, track_stock = @track_stock, stock_alert = @stock_alert, updated_at = now()
 WHERE menu_id = @menu_id;
 
+-- name: GetMenuImageKey :one
+SELECT image_key FROM menus
+WHERE menu_id = @menu_id AND outlet_id = @outlet_id AND deleted_at IS NULL;
+
+-- name: LockMenuImageKey :one
+SELECT image_key FROM menus
+WHERE menu_id = @menu_id AND outlet_id = @outlet_id AND deleted_at IS NULL
+FOR UPDATE;
+
+-- name: SetMenuImageKey :exec
+UPDATE menus SET image_key = sqlc.narg(image_key), updated_at = now()
+WHERE menu_id = @menu_id;
+
 -- name: SetMenuStock :exec
 UPDATE menus SET stock_qty = @stock_qty, updated_at = now()
 WHERE menu_id = @menu_id;
@@ -207,3 +220,14 @@ JOIN menu_categories c ON c.category_id = m.category_id
 WHERE m.outlet_id = @outlet_id AND m.menu_id = ANY (@menu_ids::text[]) AND m.deleted_at IS NULL
 ORDER BY m.menu_id
 FOR UPDATE OF m;
+
+-- name: ListLowStockMenus :many
+-- The dashboards' menus at or below their stock alert, or out of stock:
+-- the emptiest first.
+SELECT m.menu_id, m.outlet_id, m.name, m.stock_qty, m.stock_alert,
+    menu_stock_status(m.track_stock, m.stock_qty, m.stock_alert)::text AS stock_status
+FROM menus m
+WHERE m.outlet_id = ANY (@outlet_ids::text[]) AND m.deleted_at IS NULL AND m.is_active
+    AND menu_stock_status(m.track_stock, m.stock_qty, m.stock_alert) IN ('low', 'out')
+ORDER BY m.stock_qty, lower(m.name), m.menu_id
+LIMIT 50;

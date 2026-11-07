@@ -83,7 +83,7 @@ func newHarness(t *testing.T) *harness {
 	scoped := protected.Group("/outlets/:oid", middlewares.OutletScope(dbOutlets{pool}, logger))
 	routes.RegisterRoleRoutes(protected, scoped, controllers.NewRoleController(services.NewRoleService(db, roleRepo, audit)))
 	routes.RegisterStaffRoutes(scoped, controllers.NewStaffController(
-		services.NewStaffService(db, userRepo, roleRepo, hasher, audit, repositories.NewSessionRepository(db))))
+		services.NewStaffService(db, userRepo, roleRepo, hasher, audit, repositories.NewSessionRepository(db), nil)))
 
 	h := &harness{t: t, pool: pool, router: r}
 	h.exec(`INSERT INTO outlets (outlet_id, code, name, timezone, locale) VALUES

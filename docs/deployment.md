@@ -33,7 +33,7 @@ the files in `/srv/maki/web` ([maki-fe's deployment.md](../../maki-fe/docs/deplo
 
 ## The image
 
-[`Dockerfile`](../Dockerfile) builds one image with both binaries (standard
+[`Dockerfile`](../Dockerfile) builds the api's image, the last stage (standard
 §2), static (`CGO_ENABLED=0`) on `gcr.io/distroless/static-debian12:nonroot`:
 no shell, the CA certificates and the time zone database included, running
 as `nonroot`. Its commands:
@@ -45,13 +45,14 @@ as `nonroot`. Its commands:
 | `api migrate` | Applies the pending migrations, under goose's advisory lock |
 | `api create-owner` | Creates the Owner, once: it prompts, without echo |
 
-Once the worker processes images (menu photos, govips), govips needs cgo:
-the worker then gets an image of its own, Debian slim with libvips (spec;
-standard §9), and this one keeps the api.
+The worker has an image of its own, `docker build --target worker`: it converts
+photos with libvips through govips, which needs cgo, so it runs on Debian slim
+with libvips (spec; standard §9), as `nonroot`. Its command is `worker`.
 
-The pipeline pushes it as `ghcr.io/<owner>/maki-be:<commit sha>` and
-`:latest`, `<owner>` being the GitHub account that holds the repository,
-in lowercase.
+The pipeline pushes them as `ghcr.io/<owner>/maki-be:<commit sha>` and
+`ghcr.io/<owner>/maki-be-worker:<commit sha>`, and `:latest`, `<owner>` being the
+GitHub account that holds the repository, in lowercase. Both packages must be
+public for the server to pull them without signing in.
 
 ## The pipeline
 
@@ -111,6 +112,13 @@ HSTS included, so that none is sent twice. With `MAKI_HTTP_PORT=8081` and
 the certificate certbot made:
 
 ```nginx
+# In the http block, once per server (nginx.conf or conf.d): keeps connections
+# open for what isn't a WebSocket.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      '';
+}
+
 server {
     listen 80;
     listen [::]:80;
@@ -135,6 +143,10 @@ server {
         proxy_pass http://127.0.0.1:8081;
         # Required: the api takes a request whose Origin is its Host as
         # same-origin (security.md), and Caddy passes Host on as it gets it.
+        # The outlets' live messages are a WebSocket. Empty on anything else.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -197,13 +209,14 @@ for their pipelines' checkout of it.
 
 `sh deploy.sh <image>`, in `/srv/maki`:
 
-1. pulls the image;
+1. pulls the image, and the worker's beside it: the same name with `-worker`,
+   the same tag;
 2. **migrations first**, from the new image, on the shared PostgreSQL, while
    the running api still serves: every migration is safe beside the binary
    before it (add a column nullable first, backfill, then tighten; standard
    §6), and goose's advisory lock keeps two deploys from racing. One that
    fails stops the deploy, the old version still up;
-3. writes the image to `release.env`, which names the image running;
+3. writes both to `release.env`, which names the images running;
 4. starts the new api and worker (and Caddy, if it isn't up): a few seconds
    in which the API doesn't answer;
 5. checks the Caddyfile the deploy brought, and has the running Caddy read
@@ -240,8 +253,10 @@ from two places:
 | `LOG_LEVEL` | .env | `info` |
 | `SMTP_*` | .env | The email provider; outside development the worker won't start without `SMTP_HOST` |
 | `CORS_ALLOWED_ORIGINS` | .env | Empty: the web app is on the same domain |
-| `CDN_ORIGIN`, `STORAGE_ORIGIN` | .env | The object storage's origins for the web app's CSP, once menu photos come |
-| `MAKI_BE_IMAGE` | release.env, by deploy.sh | The image running |
+| `STORAGE_ENDPOINT`, `STORAGE_REGION`, `STORAGE_PUBLIC_BUCKET`, `STORAGE_PRIVATE_BUCKET`, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, `STORAGE_PUBLIC_BASE_URL` | .env | The object storage: all of them or none. Without them everything works but photos. The private bucket's CORS must allow `PUT` from the web app's origin |
+| `STORAGE_FORCE_PATH_STYLE` | .env | `true` for a provider that wants the bucket in the path |
+| `CDN_ORIGIN`, `STORAGE_ORIGIN` | .env | The same places, for the web app's CSP: the CDN's origin, and the origin of the private bucket's addresses |
+| `MAKI_BE_IMAGE`, `MAKI_WORKER_IMAGE` | release.env, by deploy.sh | The images running |
 
 ## Backups and restore
 
@@ -315,5 +330,5 @@ docker rm -f maki-restore-test
 - The worker's own image, with libvips, once it processes images.
 - Sentry and the uptime check (spec, Monitoring).
 - More than one server, or a deploy without its few seconds of downtime.
-- WebSockets through Nginx, once the outlets' realtime hub comes (spec):
-  its site then passes `Upgrade` and `Connection` on.
+- A photo through a real bucket and CDN: the adapter is only tested against a
+  stand-in. Do one by hand after setting `STORAGE_` up.

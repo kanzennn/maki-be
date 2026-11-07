@@ -11,6 +11,7 @@ type Account struct {
 	Username           string
 	Name               string
 	Email              *string
+	PhotoURL           *string // a short-lived address; nil without a photo
 	EmailVerified      bool
 	PendingEmail       *string
 	Locale             *string // their own choice; nil follows the outlet
@@ -84,6 +85,7 @@ type MeResponse struct {
 	Username           string         `json:"username"`
 	Name               string         `json:"name"`
 	Email              *string        `json:"email"`
+	PhotoURL           *string        `json:"photo_url"`
 	EmailVerified      bool           `json:"email_verified"`
 	PendingEmail       *string        `json:"pending_email"`
 	Locale             *string        `json:"locale"`

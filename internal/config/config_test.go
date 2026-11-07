@@ -23,6 +23,8 @@ func setEnv(t *testing.T, vars map[string]string) {
 		"DB_HOST", "DB_PORT", "DB_DATABASE", "DB_USERNAME", "DB_PASSWORD", "DB_SSLMODE",
 		"JWT_SECRET", "WEB_BASE_URL",
 		"SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM",
+		"STORAGE_ENDPOINT", "STORAGE_REGION", "STORAGE_PUBLIC_BUCKET", "STORAGE_PRIVATE_BUCKET",
+		"STORAGE_ACCESS_KEY", "STORAGE_SECRET_KEY", "STORAGE_FORCE_PATH_STYLE", "STORAGE_PUBLIC_BASE_URL",
 	} {
 		v, ok := vars[key]
 		if !ok {
@@ -64,6 +66,61 @@ func TestLoadRequiresAStrongJWTSecret(t *testing.T) {
 	cfg, err := Load()
 	if err != nil || cfg.JWTSecret != testSecret {
 		t.Errorf("Load() = %q, %v; want the 32-byte secret", cfg.JWTSecret, err)
+	}
+}
+
+func storageEnv() map[string]string {
+	return map[string]string{
+		"APP_ENV": "development", "DATABASE_URL": "postgres://localhost:5432/maki",
+		"STORAGE_ENDPOINT": "https://s3.example.com", "STORAGE_REGION": "auto",
+		"STORAGE_PUBLIC_BUCKET": "pub", "STORAGE_PRIVATE_BUCKET": "priv",
+		"STORAGE_ACCESS_KEY": "made-up-access", "STORAGE_SECRET_KEY": "made-up-secret",
+		"STORAGE_PUBLIC_BASE_URL": "https://cdn.example.com",
+	}
+}
+
+func TestLoadStorage(t *testing.T) {
+	setEnv(t, map[string]string{"APP_ENV": "development", "DATABASE_URL": "postgres://localhost:5432/maki"})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Storage.Enabled() {
+		t.Error("no variables, no storage")
+	}
+
+	env := storageEnv()
+	env["STORAGE_FORCE_PATH_STYLE"] = "true"
+	setEnv(t, env)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Storage.Enabled() || !cfg.Storage.ForcePathStyle || cfg.Storage.PrivateBucket != "priv" {
+		t.Errorf("storage = %+v", cfg.Storage.Region)
+	}
+}
+
+func TestLoadStorageRefuses(t *testing.T) {
+	for name, change := range map[string]map[string]string{
+		"a variable missing":        {"STORAGE_SECRET_KEY": ""},
+		"only the endpoint missing": {"STORAGE_ENDPOINT": ""},
+		"no scheme":                 {"STORAGE_ENDPOINT": "s3.example.com"},
+		"a bad base":                {"STORAGE_PUBLIC_BASE_URL": "cdn.example.com"},
+		"not a boolean":             {"STORAGE_FORCE_PATH_STYLE": "maybe"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := storageEnv()
+			maps.Copy(env, change)
+			setEnv(t, env)
+			_, err := Load()
+			if err == nil {
+				t.Fatal("no error")
+			}
+			if strings.Contains(err.Error(), "made-up-secret") {
+				t.Error("the error prints the secret")
+			}
+		})
 	}
 }
 

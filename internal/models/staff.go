@@ -9,6 +9,7 @@ type Staff struct {
 	Username           string
 	Email              *string
 	Phone              *string
+	PhotoURL           *string // a short-lived address; nil without a photo
 	IsManager          bool
 	Active             bool
 	MustChangePassword bool
@@ -42,6 +43,10 @@ type StaffInput struct {
 	Password  string
 	RoleID    *string
 	IsManager bool
+	// UploadKey is a new photo, uploaded; RemovePhoto takes the photo away.
+	// UploadKey wins if both are sent.
+	UploadKey   *string
+	RemovePhoto bool
 }
 
 // StaffProfile is an account's own fields, checked, as the Log Action
@@ -90,6 +95,7 @@ type StaffResponse struct {
 	Username           string             `json:"username"`
 	Email              *string            `json:"email"`
 	Phone              *string            `json:"phone"`
+	PhotoURL           *string            `json:"photo_url"`
 	IsManager          bool               `json:"is_manager"`
 	Role               *StaffRoleResponse `json:"role"`
 	Status             string             `json:"status"`
@@ -102,7 +108,7 @@ type StaffResponse struct {
 // NewStaffResponse returns the account's response, its times in UTC.
 func NewStaffResponse(s Staff) StaffResponse {
 	out := StaffResponse{
-		UserID: s.UserID, Name: s.Name, Username: s.Username, Email: s.Email, Phone: s.Phone,
+		UserID: s.UserID, Name: s.Name, Username: s.Username, Email: s.Email, Phone: s.Phone, PhotoURL: s.PhotoURL,
 		IsManager: s.IsManager, Status: "inactive", MustChangePassword: s.MustChangePassword,
 		CreatedAt: s.CreatedAt.UTC(), UpdatedAt: s.UpdatedAt.UTC(),
 	}

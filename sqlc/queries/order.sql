@@ -118,3 +118,107 @@ LIMIT @page_size OFFSET @page_offset;
 SELECT count(*)
 FROM orders
 WHERE voucher_id = @voucher_id;
+
+-- The dashboards. Each outlet's period is its own days, in its own time zone:
+-- the caller works them out into the instants they start and end at, which
+-- orders_outlet_created_idx finds. Sales are the paid orders; voids are
+-- counted apart.
+
+-- name: DashboardByOutlet :many
+WITH period AS (
+    SELECT unnest(@outlet_ids::text[]) AS outlet_id, unnest(@timezones::text[]) AS timezone,
+        unnest(@starts::timestamptz[]) AS start_at, unnest(@ends::timestamptz[]) AS end_at
+)
+SELECT o.outlet_id,
+    COALESCE(sum(o.total) FILTER (WHERE o.status = 'paid'), 0)::bigint AS sales,
+    count(*) FILTER (WHERE o.status = 'paid')::int AS transactions,
+    COALESCE(sum(o.total) FILTER (WHERE o.status = 'void'), 0)::bigint AS void_total,
+    count(*) FILTER (WHERE o.status = 'void')::int AS void_count
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+GROUP BY o.outlet_id;
+
+-- name: DashboardItemsSold :one
+WITH period AS (
+    SELECT unnest(@outlet_ids::text[]) AS outlet_id, unnest(@timezones::text[]) AS timezone,
+        unnest(@starts::timestamptz[]) AS start_at, unnest(@ends::timestamptz[]) AS end_at
+)
+SELECT COALESCE(sum(i.qty), 0)::bigint
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+JOIN order_items i ON i.order_id = o.order_id AND i.outlet_id = o.outlet_id
+WHERE o.status = 'paid';
+
+-- name: DashboardByDay :many
+WITH period AS (
+    SELECT unnest(@outlet_ids::text[]) AS outlet_id, unnest(@timezones::text[]) AS timezone,
+        unnest(@starts::timestamptz[]) AS start_at, unnest(@ends::timestamptz[]) AS end_at
+)
+SELECT to_char(o.client_created_at AT TIME ZONE r.timezone, 'YYYY-MM-DD')::text AS day,
+    COALESCE(sum(o.total), 0)::bigint AS sales, count(*)::int AS transactions
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+WHERE o.status = 'paid'
+GROUP BY day
+ORDER BY day;
+
+-- name: DashboardByHour :many
+WITH period AS (
+    SELECT unnest(@outlet_ids::text[]) AS outlet_id, unnest(@timezones::text[]) AS timezone,
+        unnest(@starts::timestamptz[]) AS start_at, unnest(@ends::timestamptz[]) AS end_at
+)
+SELECT extract(hour FROM o.client_created_at AT TIME ZONE r.timezone)::int AS hour,
+    COALESCE(sum(o.total), 0)::bigint AS sales, count(*)::int AS transactions
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+WHERE o.status = 'paid'
+GROUP BY hour
+ORDER BY hour;
+
+-- name: DashboardByMethod :many
+WITH period AS (
+    SELECT unnest(@outlet_ids::text[]) AS outlet_id, unnest(@timezones::text[]) AS timezone,
+        unnest(@starts::timestamptz[]) AS start_at, unnest(@ends::timestamptz[]) AS end_at
+)
+SELECT p.method, COALESCE(sum(p.amount), 0)::bigint AS amount, count(*)::int AS transactions
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+JOIN payments p ON p.order_id = o.order_id AND p.outlet_id = o.outlet_id
+WHERE o.status = 'paid'
+GROUP BY p.method
+ORDER BY amount DESC, p.method;
+
+-- name: DashboardTopMenus :many
+-- The ten that sold the most. A menu keeps the name of its latest sale.
+WITH period AS (
+    SELECT unnest(@outlet_ids::text[]) AS outlet_id, unnest(@timezones::text[]) AS timezone,
+        unnest(@starts::timestamptz[]) AS start_at, unnest(@ends::timestamptz[]) AS end_at
+)
+SELECT i.menu_id, o.outlet_id, (array_agg(i.menu_name ORDER BY o.client_created_at DESC))[1]::text AS name,
+    sum(i.qty)::bigint AS qty, sum(i.line_total)::bigint AS sales
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+JOIN order_items i ON i.order_id = o.order_id AND i.outlet_id = o.outlet_id
+WHERE o.status = 'paid'
+GROUP BY i.menu_id, o.outlet_id
+ORDER BY qty DESC, sales DESC, i.menu_id
+LIMIT 10;
+
+-- name: DashboardByCashier :many
+WITH period AS (
+    SELECT unnest(@outlet_ids::text[]) AS outlet_id, unnest(@timezones::text[]) AS timezone,
+        unnest(@starts::timestamptz[]) AS start_at, unnest(@ends::timestamptz[]) AS end_at
+)
+SELECT o.cashier_id, COALESCE(sum(o.total), 0)::bigint AS sales, count(*)::int AS transactions
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+WHERE o.status = 'paid'
+GROUP BY o.cashier_id
+ORDER BY sales DESC, o.cashier_id;

@@ -70,8 +70,13 @@ project-specific to put in them.
   development go to a pair of dev buckets at IDCloudHost, separate from
   production and with their own access key, so they need internet access.
   Tests use an in-memory fake of `Storage`. The dev buckets and key still
-  have to be created before uploads are built; their private bucket's CORS
-  must allow `http://localhost:3002`.
+  have to be created to see a photo in development, and their private
+  bucket's CORS must allow `http://localhost:3002`; until then uploads answer
+  `storage_unavailable` and everything else works. No test has reached a real
+  bucket yet.
+- **Photos in development.** The worker's conversion needs libvips, built with
+  the `vips` tag. A worker built without it starts, warns, and fails its photo
+  jobs, so run it from the worker's image (`docker build --target worker`).
 - **Integration tests use the development PostgreSQL.** The standard starts
   a PostgreSQL container per test run with testcontainers. This project
   already has a PostgreSQL 16 server in Docker, so each integration test
@@ -82,9 +87,9 @@ project-specific to put in them.
   probes, migrations with `api migrate`, the outbox and its worker, CUID2
   IDs), and so are sign-in, sessions, password and email flows, the Log
   Action, outlets, permissions with roles and staff accounts, and the menu
-  with its stock, the cashier's devices and payment methods, and the
-  cashier online: orders, cash, voids. Menu photos come with uploads; the
-  cashier offline, with sync, comes next;
+  with its stock, the cashier's devices and payment methods, the cashier
+  online: orders, cash, voids, Payment Control, the Log Action read back, the
+  dashboard, realtime, and photos. The cashier offline, with sync, comes next;
   [security.md](./security.md#not-built-yet) lists what the security baseline
   still lacks.
 - **An outlet's code locks with its first order**, as the spec has it. A

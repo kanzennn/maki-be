@@ -118,3 +118,36 @@ func moduleRoot(t *testing.T) string {
 		dir = parent
 	}
 }
+
+// The api builds static, so nothing it imports may reach the image package,
+// whose conversion needs cgo. Only cmd/worker hands it over, and jobs is only
+// imported there.
+func TestOnlyTheWorkerReachesImages(t *testing.T) {
+	root := moduleRoot(t)
+	fset := token.NewFileSet()
+	dirs := []string{"cmd/api"}
+	for _, layer := range []string{"config", "routes", "middlewares", "controllers", "services", "repositories", "models", "validations"} {
+		dirs = append(dirs, "internal/"+layer)
+	}
+	for _, dir := range dirs {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return err
+			}
+			file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+			if err != nil {
+				return err
+			}
+			for _, imp := range file.Imports {
+				target, _ := strconv.Unquote(imp.Path.Value)
+				if target == module+"/internal/utils/imaging" || target == module+"/internal/jobs" || strings.Contains(target, "govips") {
+					t.Errorf("%s imports %s", path, target)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}

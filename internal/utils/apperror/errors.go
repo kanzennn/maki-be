@@ -230,6 +230,21 @@ var (
 	ErrDeviceActive = NewError(http.StatusConflict, "device_already_active")
 )
 
+// Payment Control.
+var (
+	// ErrPaymentMethodRequired is turning cash off: it is the one method that
+	// works offline, so it stays on.
+	ErrPaymentMethodRequired = NewError(http.StatusConflict, "payment_method_required")
+	// ErrPaymentMethodComingSoon is turning on a method not released yet.
+	ErrPaymentMethodComingSoon = NewError(http.StatusConflict, "payment_method_coming_soon")
+	// ErrStorageUnavailable is asking for an upload where no object storage
+	// is configured.
+	ErrStorageUnavailable = NewError(http.StatusServiceUnavailable, "storage_unavailable")
+	// ErrUploadNotFound is claiming an upload that never finished, or that
+	// is long gone.
+	ErrUploadNotFound = NewError(http.StatusUnprocessableEntity, "upload_not_found")
+)
+
 // Orders: the cashier's sales and their voids.
 //
 // An online sale is charged with the figures on the cashier's screen, so the

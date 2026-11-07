@@ -95,3 +95,11 @@ UPDATE outlets
 SET deleted_at = now(),
     updated_at = now()
 WHERE outlet_id = @outlet_id;
+
+-- name: ListOutletZones :many
+-- The outlets a dashboard adds up, each with the time zone its days are in;
+-- with no IDs given, every outlet not deleted.
+SELECT outlet_id, code, name, timezone
+FROM outlets
+WHERE deleted_at IS NULL AND (sqlc.narg(outlet_ids)::text[] IS NULL OR outlet_id = ANY (sqlc.narg(outlet_ids)))
+ORDER BY lower(name), outlet_id;

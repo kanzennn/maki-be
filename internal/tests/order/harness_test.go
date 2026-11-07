@@ -112,7 +112,7 @@ func newHarness(t *testing.T) *harness {
 	categoryRepo := repositories.NewCategoryRepository(db)
 	categories := services.NewCategoryService(db, categoryRepo, audit)
 	menus := services.NewMenuService(db, repositories.NewMenuRepository(db), categoryRepo,
-		repositories.NewStockRepository(db), audit)
+		repositories.NewStockRepository(db), audit, nil)
 	devices := services.NewDeviceService(db, repositories.NewDeviceRepository(db), users, audit)
 	vouchers := services.NewVoucherService(db, repositories.NewVoucherRepository(db), outlets, devices, orderRepo, audit,
 		time.Now)

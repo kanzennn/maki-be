@@ -1,9 +1,10 @@
 #!/bin/sh
-# Deploys a maki-be image on the VPS: pulls it, applies its migrations to the
-# server's shared PostgreSQL while the running api still serves, starts the
-# api and the worker from it, and waits until the api is ready. Run from
-# /srv/maki, beside compose.yaml and .env; maki-be's deploy job calls it over
-# SSH, and rolling back is the same command with the previous image.
+# Deploys a maki-be release on the VPS: pulls the api's image and the worker's
+# beside it (the same name with -worker, the same tag), applies the migrations
+# to the server's shared PostgreSQL while the running api still serves, starts
+# both, and waits until the api is ready. Run from /srv/maki, beside
+# compose.yaml and .env; maki-be's deploy job calls it over SSH, and rolling
+# back is the same command with the previous image.
 #
 #   sh deploy.sh ghcr.io/<owner>/maki-be:<sha>
 set -eu
@@ -19,16 +20,19 @@ fi
 
 compose() { docker compose --env-file .env --env-file release.env "$@"; }
 
+worker_image="${image%:*}-worker:${image##*:}"
+
 docker pull "$image"
+docker pull "$worker_image"
 
 # Migrations first, from the new image (Go + Gin standard §6): each is safe
 # beside the api still running, and goose's advisory lock keeps two deploys
 # from racing. A failed migration stops here, the old version still up.
 # Until they pass, the new image is named here only: release.env keeps the
 # running one (and has none yet on the first deploy).
-MAKI_BE_IMAGE="$image" compose run --rm --no-deps api api migrate
+MAKI_BE_IMAGE="$image" MAKI_WORKER_IMAGE="$worker_image" compose run --rm --no-deps api api migrate
 
-printf 'MAKI_BE_IMAGE=%s\n' "$image" > release.env
+printf 'MAKI_BE_IMAGE=%s\nMAKI_WORKER_IMAGE=%s\n' "$image" "$worker_image" > release.env
 compose up -d --remove-orphans api worker caddy
 # The Caddyfile this deploy brought: checked, then read again by the running
 # Caddy without dropping a connection. A Caddy that just started read it

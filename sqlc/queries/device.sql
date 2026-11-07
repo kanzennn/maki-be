@@ -58,3 +58,9 @@ FOR UPDATE;
 -- name: TouchDevice :exec
 UPDATE devices SET last_seen_at = now()
 WHERE device_id = @device_id;
+
+-- name: ListDeviceRefs :many
+-- Names devices for the Log Action, revoked ones too.
+SELECT device_id, code, name
+FROM devices
+WHERE device_id = ANY (@device_ids::text[]);

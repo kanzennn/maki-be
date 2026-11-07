@@ -44,7 +44,8 @@ On Windows without `make`, run the command from the `Makefile` directly
 ## CI/CD and deployment
 
 `.github/workflows/ci.yml` (CI/CD) runs on every push to `main`: the tests,
-then the image to GHCR (`Dockerfile`, `docker build -t maki-be .`), then, once
+then the two images to GHCR (`Dockerfile`: `docker build -t maki-be .` for the
+api, `docker build --target worker -t maki-be-worker .` for the worker), then, once
 deploys are enabled, the deploy to the VPS over SSH. The production stack is in
 `deploy/`; [docs/deployment.md](docs/deployment.md) sets it all up.
 

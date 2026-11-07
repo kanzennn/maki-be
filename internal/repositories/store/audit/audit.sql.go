@@ -11,6 +11,37 @@ import (
 	"time"
 )
 
+const countActionLogs = `-- name: CountActionLogs :one
+SELECT count(*)
+FROM action_logs
+WHERE ($1::timestamptz IS NULL OR occurred_at >= $1)
+    AND ($2::timestamptz IS NULL OR occurred_at < $2)
+    AND ($3::text[] IS NULL OR action = ANY ($3))
+    AND ($4::text[] IS NULL OR outlet_id = ANY ($4))
+    AND ($5::text IS NULL OR user_id = $5)
+`
+
+type CountActionLogsParams struct {
+	FromAt    *time.Time
+	ToAt      *time.Time
+	Actions   []string
+	OutletIds []string
+	UserID    *string
+}
+
+func (q *Queries) CountActionLogs(ctx context.Context, arg CountActionLogsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countActionLogs,
+		arg.FromAt,
+		arg.ToAt,
+		arg.Actions,
+		arg.OutletIds,
+		arg.UserID,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const insertActionLog = `-- name: InsertActionLog :exec
 INSERT INTO action_logs (
     action_log_id, outlet_id, user_id, device_id, action, target_type, target_id,
@@ -53,4 +84,69 @@ func (q *Queries) InsertActionLog(ctx context.Context, arg InsertActionLogParams
 		arg.OccurredAt,
 	)
 	return err
+}
+
+const listActionLogs = `-- name: ListActionLogs :many
+SELECT action_log_id, outlet_id, user_id, device_id, action, target_type, target_id,
+    before_json, after_json, ip, occurred_at, created_at
+FROM action_logs
+WHERE ($1::timestamptz IS NULL OR occurred_at >= $1)
+    AND ($2::timestamptz IS NULL OR occurred_at < $2)
+    AND ($3::text[] IS NULL OR action = ANY ($3))
+    AND ($4::text[] IS NULL OR outlet_id = ANY ($4))
+    AND ($5::text IS NULL OR user_id = $5)
+ORDER BY occurred_at DESC, action_log_id DESC
+LIMIT $7 OFFSET $6
+`
+
+type ListActionLogsParams struct {
+	FromAt     *time.Time
+	ToAt       *time.Time
+	Actions    []string
+	OutletIds  []string
+	UserID     *string
+	PageOffset int32
+	PageSize   int32
+}
+
+// Newest first. The ID breaks ties, so a page never repeats an entry.
+func (q *Queries) ListActionLogs(ctx context.Context, arg ListActionLogsParams) ([]ActionLog, error) {
+	rows, err := q.db.Query(ctx, listActionLogs,
+		arg.FromAt,
+		arg.ToAt,
+		arg.Actions,
+		arg.OutletIds,
+		arg.UserID,
+		arg.PageOffset,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionLog
+	for rows.Next() {
+		var i ActionLog
+		if err := rows.Scan(
+			&i.ActionLogID,
+			&i.OutletID,
+			&i.UserID,
+			&i.DeviceID,
+			&i.Action,
+			&i.TargetType,
+			&i.TargetID,
+			&i.BeforeJSON,
+			&i.AfterJSON,
+			&i.IP,
+			&i.OccurredAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

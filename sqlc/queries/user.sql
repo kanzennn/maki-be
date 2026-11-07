@@ -11,6 +11,28 @@ FROM users
 WHERE user_id = @user_id
   AND deleted_at IS NULL;
 
+-- name: GetUserPhotoKey :one
+SELECT photo_key FROM users
+WHERE user_id = @user_id AND deleted_at IS NULL;
+
+-- name: LockUserPhotoKey :one
+SELECT photo_key FROM users
+WHERE user_id = @user_id AND deleted_at IS NULL
+FOR UPDATE;
+
+-- name: SetUserPhotoKey :exec
+UPDATE users SET photo_key = sqlc.narg(photo_key), updated_at = now()
+WHERE user_id = @user_id;
+
+-- name: ListUserLabels :many
+-- Who an account is, for the Log Action: deleted accounts too, and the name
+-- of a staff member's role.
+SELECT u.user_id, u.name, u.is_owner, u.is_manager, r.name AS role_name
+FROM users u
+LEFT JOIN user_roles ur ON ur.user_id = u.user_id
+LEFT JOIN roles r ON r.role_id = ur.role_id
+WHERE u.user_id = ANY (@user_ids::text[]);
+
 -- name: ListUserNames :many
 -- For records that name who made them, such as the stock history. A deleted
 -- account keeps its name there.
@@ -190,6 +212,7 @@ SELECT u.user_id,
        u.username,
        u.email,
        u.phone,
+       u.photo_key,
        u.is_manager,
        u.status,
        u.must_change_password,
@@ -230,6 +253,7 @@ SELECT u.user_id,
        u.username,
        u.email,
        u.phone,
+       u.photo_key,
        u.is_manager,
        u.status,
        u.must_change_password,

@@ -313,3 +313,18 @@ func TestMenuAccess(t *testing.T) {
 	h.do(http.MethodGet, "/api/v1/outlets/o2/menus", "manager", nil).status(http.StatusNotFound, "outlet_not_found")
 	h.do(http.MethodGet, menus, "", nil).status(http.StatusUnauthorized, "unauthorized")
 }
+
+func TestUploadWithoutStorage(t *testing.T) {
+	h := newHarness(t)
+	cat := h.createCategory("Minuman", "").CategoryID
+	h.do(http.MethodPost, menus, "manager", map[string]any{
+		"name": "Kopi", "category_id": cat, "price": 18000, "upload_key": "uploads/abc",
+	}).status(http.StatusServiceUnavailable, "storage_unavailable")
+	m := h.createMenu(map[string]any{"name": "Jeruk", "category_id": cat, "price": 8000})
+	if m.ImageURL != nil || m.ImageThumbURL != nil {
+		t.Errorf("a menu without a photo: %v %v", m.ImageURL, m.ImageThumbURL)
+	}
+	h.do(http.MethodPut, menus+"/"+m.MenuID, "manager", map[string]any{
+		"name": "Jeruk", "category_id": cat, "price": 8000, "upload_key": "uploads/abc",
+	}).status(http.StatusServiceUnavailable, "storage_unavailable")
+}

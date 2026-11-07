@@ -49,6 +49,380 @@ func (q *Queries) CountVoucherUses(ctx context.Context, voucherID *string) (int6
 	return count, err
 }
 
+const dashboardByCashier = `-- name: DashboardByCashier :many
+WITH period AS (
+    SELECT unnest($1::text[]) AS outlet_id, unnest($2::text[]) AS timezone,
+        unnest($3::timestamptz[]) AS start_at, unnest($4::timestamptz[]) AS end_at
+)
+SELECT o.cashier_id, COALESCE(sum(o.total), 0)::bigint AS sales, count(*)::int AS transactions
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+WHERE o.status = 'paid'
+GROUP BY o.cashier_id
+ORDER BY sales DESC, o.cashier_id
+`
+
+type DashboardByCashierParams struct {
+	OutletIds []string
+	Timezones []string
+	Starts    []time.Time
+	Ends      []time.Time
+}
+
+type DashboardByCashierRow struct {
+	CashierID    string
+	Sales        int64
+	Transactions int32
+}
+
+func (q *Queries) DashboardByCashier(ctx context.Context, arg DashboardByCashierParams) ([]DashboardByCashierRow, error) {
+	rows, err := q.db.Query(ctx, dashboardByCashier,
+		arg.OutletIds,
+		arg.Timezones,
+		arg.Starts,
+		arg.Ends,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DashboardByCashierRow
+	for rows.Next() {
+		var i DashboardByCashierRow
+		if err := rows.Scan(&i.CashierID, &i.Sales, &i.Transactions); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const dashboardByDay = `-- name: DashboardByDay :many
+WITH period AS (
+    SELECT unnest($1::text[]) AS outlet_id, unnest($2::text[]) AS timezone,
+        unnest($3::timestamptz[]) AS start_at, unnest($4::timestamptz[]) AS end_at
+)
+SELECT to_char(o.client_created_at AT TIME ZONE r.timezone, 'YYYY-MM-DD')::text AS day,
+    COALESCE(sum(o.total), 0)::bigint AS sales, count(*)::int AS transactions
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+WHERE o.status = 'paid'
+GROUP BY day
+ORDER BY day
+`
+
+type DashboardByDayParams struct {
+	OutletIds []string
+	Timezones []string
+	Starts    []time.Time
+	Ends      []time.Time
+}
+
+type DashboardByDayRow struct {
+	Day          string
+	Sales        int64
+	Transactions int32
+}
+
+func (q *Queries) DashboardByDay(ctx context.Context, arg DashboardByDayParams) ([]DashboardByDayRow, error) {
+	rows, err := q.db.Query(ctx, dashboardByDay,
+		arg.OutletIds,
+		arg.Timezones,
+		arg.Starts,
+		arg.Ends,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DashboardByDayRow
+	for rows.Next() {
+		var i DashboardByDayRow
+		if err := rows.Scan(&i.Day, &i.Sales, &i.Transactions); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const dashboardByHour = `-- name: DashboardByHour :many
+WITH period AS (
+    SELECT unnest($1::text[]) AS outlet_id, unnest($2::text[]) AS timezone,
+        unnest($3::timestamptz[]) AS start_at, unnest($4::timestamptz[]) AS end_at
+)
+SELECT extract(hour FROM o.client_created_at AT TIME ZONE r.timezone)::int AS hour,
+    COALESCE(sum(o.total), 0)::bigint AS sales, count(*)::int AS transactions
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+WHERE o.status = 'paid'
+GROUP BY hour
+ORDER BY hour
+`
+
+type DashboardByHourParams struct {
+	OutletIds []string
+	Timezones []string
+	Starts    []time.Time
+	Ends      []time.Time
+}
+
+type DashboardByHourRow struct {
+	Hour         int32
+	Sales        int64
+	Transactions int32
+}
+
+func (q *Queries) DashboardByHour(ctx context.Context, arg DashboardByHourParams) ([]DashboardByHourRow, error) {
+	rows, err := q.db.Query(ctx, dashboardByHour,
+		arg.OutletIds,
+		arg.Timezones,
+		arg.Starts,
+		arg.Ends,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DashboardByHourRow
+	for rows.Next() {
+		var i DashboardByHourRow
+		if err := rows.Scan(&i.Hour, &i.Sales, &i.Transactions); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const dashboardByMethod = `-- name: DashboardByMethod :many
+WITH period AS (
+    SELECT unnest($1::text[]) AS outlet_id, unnest($2::text[]) AS timezone,
+        unnest($3::timestamptz[]) AS start_at, unnest($4::timestamptz[]) AS end_at
+)
+SELECT p.method, COALESCE(sum(p.amount), 0)::bigint AS amount, count(*)::int AS transactions
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+JOIN payments p ON p.order_id = o.order_id AND p.outlet_id = o.outlet_id
+WHERE o.status = 'paid'
+GROUP BY p.method
+ORDER BY amount DESC, p.method
+`
+
+type DashboardByMethodParams struct {
+	OutletIds []string
+	Timezones []string
+	Starts    []time.Time
+	Ends      []time.Time
+}
+
+type DashboardByMethodRow struct {
+	Method       string
+	Amount       int64
+	Transactions int32
+}
+
+func (q *Queries) DashboardByMethod(ctx context.Context, arg DashboardByMethodParams) ([]DashboardByMethodRow, error) {
+	rows, err := q.db.Query(ctx, dashboardByMethod,
+		arg.OutletIds,
+		arg.Timezones,
+		arg.Starts,
+		arg.Ends,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DashboardByMethodRow
+	for rows.Next() {
+		var i DashboardByMethodRow
+		if err := rows.Scan(&i.Method, &i.Amount, &i.Transactions); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const dashboardByOutlet = `-- name: DashboardByOutlet :many
+
+WITH period AS (
+    SELECT unnest($1::text[]) AS outlet_id, unnest($2::text[]) AS timezone,
+        unnest($3::timestamptz[]) AS start_at, unnest($4::timestamptz[]) AS end_at
+)
+SELECT o.outlet_id,
+    COALESCE(sum(o.total) FILTER (WHERE o.status = 'paid'), 0)::bigint AS sales,
+    count(*) FILTER (WHERE o.status = 'paid')::int AS transactions,
+    COALESCE(sum(o.total) FILTER (WHERE o.status = 'void'), 0)::bigint AS void_total,
+    count(*) FILTER (WHERE o.status = 'void')::int AS void_count
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+GROUP BY o.outlet_id
+`
+
+type DashboardByOutletParams struct {
+	OutletIds []string
+	Timezones []string
+	Starts    []time.Time
+	Ends      []time.Time
+}
+
+type DashboardByOutletRow struct {
+	OutletID     string
+	Sales        int64
+	Transactions int32
+	VoidTotal    int64
+	VoidCount    int32
+}
+
+// The dashboards. Each outlet's period is its own days, in its own time zone:
+// the caller works them out into the instants they start and end at, which
+// orders_outlet_created_idx finds. Sales are the paid orders; voids are
+// counted apart.
+func (q *Queries) DashboardByOutlet(ctx context.Context, arg DashboardByOutletParams) ([]DashboardByOutletRow, error) {
+	rows, err := q.db.Query(ctx, dashboardByOutlet,
+		arg.OutletIds,
+		arg.Timezones,
+		arg.Starts,
+		arg.Ends,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DashboardByOutletRow
+	for rows.Next() {
+		var i DashboardByOutletRow
+		if err := rows.Scan(
+			&i.OutletID,
+			&i.Sales,
+			&i.Transactions,
+			&i.VoidTotal,
+			&i.VoidCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const dashboardItemsSold = `-- name: DashboardItemsSold :one
+WITH period AS (
+    SELECT unnest($1::text[]) AS outlet_id, unnest($2::text[]) AS timezone,
+        unnest($3::timestamptz[]) AS start_at, unnest($4::timestamptz[]) AS end_at
+)
+SELECT COALESCE(sum(i.qty), 0)::bigint
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+JOIN order_items i ON i.order_id = o.order_id AND i.outlet_id = o.outlet_id
+WHERE o.status = 'paid'
+`
+
+type DashboardItemsSoldParams struct {
+	OutletIds []string
+	Timezones []string
+	Starts    []time.Time
+	Ends      []time.Time
+}
+
+func (q *Queries) DashboardItemsSold(ctx context.Context, arg DashboardItemsSoldParams) (int64, error) {
+	row := q.db.QueryRow(ctx, dashboardItemsSold,
+		arg.OutletIds,
+		arg.Timezones,
+		arg.Starts,
+		arg.Ends,
+	)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const dashboardTopMenus = `-- name: DashboardTopMenus :many
+WITH period AS (
+    SELECT unnest($1::text[]) AS outlet_id, unnest($2::text[]) AS timezone,
+        unnest($3::timestamptz[]) AS start_at, unnest($4::timestamptz[]) AS end_at
+)
+SELECT i.menu_id, o.outlet_id, (array_agg(i.menu_name ORDER BY o.client_created_at DESC))[1]::text AS name,
+    sum(i.qty)::bigint AS qty, sum(i.line_total)::bigint AS sales
+FROM orders o
+JOIN period r ON r.outlet_id = o.outlet_id
+    AND o.client_created_at >= r.start_at AND o.client_created_at < r.end_at
+JOIN order_items i ON i.order_id = o.order_id AND i.outlet_id = o.outlet_id
+WHERE o.status = 'paid'
+GROUP BY i.menu_id, o.outlet_id
+ORDER BY qty DESC, sales DESC, i.menu_id
+LIMIT 10
+`
+
+type DashboardTopMenusParams struct {
+	OutletIds []string
+	Timezones []string
+	Starts    []time.Time
+	Ends      []time.Time
+}
+
+type DashboardTopMenusRow struct {
+	MenuID   string
+	OutletID string
+	Name     string
+	Qty      int64
+	Sales    int64
+}
+
+// The ten that sold the most. A menu keeps the name of its latest sale.
+func (q *Queries) DashboardTopMenus(ctx context.Context, arg DashboardTopMenusParams) ([]DashboardTopMenusRow, error) {
+	rows, err := q.db.Query(ctx, dashboardTopMenus,
+		arg.OutletIds,
+		arg.Timezones,
+		arg.Starts,
+		arg.Ends,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DashboardTopMenusRow
+	for rows.Next() {
+		var i DashboardTopMenusRow
+		if err := rows.Scan(
+			&i.MenuID,
+			&i.OutletID,
+			&i.Name,
+			&i.Qty,
+			&i.Sales,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const findOrder = `-- name: FindOrder :one
 SELECT outlet_id, request_hash
 FROM orders

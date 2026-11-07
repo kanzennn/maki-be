@@ -62,7 +62,10 @@ func (ctl *StaffController) CreateStaff(c *gin.Context) {
 		_ = c.Error(err)
 		return
 	}
-	s, err := ctl.staff.CreateStaff(c.Request.Context(), principal(c), c.ClientIP(), c.Param("oid"), models.StaffInput(req))
+	s, err := ctl.staff.CreateStaff(c.Request.Context(), principal(c), c.ClientIP(), c.Param("oid"), models.StaffInput{
+		Name: req.Name, Username: req.Username, Email: req.Email, Phone: req.Phone, Password: req.Password,
+		RoleID: req.RoleID, IsManager: req.IsManager, UploadKey: req.UploadKey,
+	})
 	if err != nil {
 		_ = c.Error(err)
 		return
@@ -77,7 +80,7 @@ func (ctl *StaffController) UpdateStaff(c *gin.Context) {
 		_ = c.Error(err)
 		return
 	}
-	in := models.StaffInput{Name: req.Name, Email: req.Email, Phone: req.Phone, RoleID: req.RoleID, IsManager: req.IsManager}
+	in := models.StaffInput{Name: req.Name, Email: req.Email, Phone: req.Phone, RoleID: req.RoleID, IsManager: req.IsManager, UploadKey: req.UploadKey, RemovePhoto: req.RemovePhoto}
 	s, err := ctl.staff.UpdateStaff(c.Request.Context(), principal(c), c.ClientIP(), c.Param("oid"), c.Param("uid"), in)
 	if err != nil {
 		_ = c.Error(err)

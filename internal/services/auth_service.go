@@ -388,6 +388,7 @@ func (s *AuthService) Me(ctx context.Context, userID string) (models.Account, er
 		Username:           u.Username,
 		Name:               u.Name,
 		Email:              u.Email,
+		PhotoURL:           s.users.PhotoURL(ctx, u.PhotoKey),
 		EmailVerified:      verified,
 		Locale:             u.Locale,
 		Language:           language(u.Locale, o.Locale),

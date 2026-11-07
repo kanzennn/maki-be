@@ -16,6 +16,12 @@ import (
 	"github.com/kervzent/maki-be/internal/validations"
 )
 
+// What a change did to a menu's photo, as the Log Action stores it.
+const (
+	imageNew     = "new"
+	imageRemoved = "removed"
+)
+
 // MenuService is each outlet's menus, and the cashier's side of them: what
 // it sells, and the stock its sales take and its voids put back, which the
 // checkout and the orders ask for. Every method takes the outlet it acts
@@ -26,13 +32,15 @@ type MenuService struct {
 	categories *repositories.CategoryRepository
 	stock      *repositories.StockRepository
 	audit      *AuditService
+	media      *MediaService
 }
 
-// NewMenuService returns the menus' service.
+// NewMenuService returns the menus' service. media is nil-safe: see
+// MediaService.
 func NewMenuService(db *config.Database, menus *repositories.MenuRepository, categories *repositories.CategoryRepository,
-	stock *repositories.StockRepository, audit *AuditService,
+	stock *repositories.StockRepository, audit *AuditService, media *MediaService,
 ) *MenuService {
-	return &MenuService{db: db, menus: menus, categories: categories, stock: stock, audit: audit}
+	return &MenuService{db: db, menus: menus, categories: categories, stock: stock, audit: audit, media: media}
 }
 
 // ListMenus returns a page of the outlet's menus, in the cashier's order,
@@ -56,6 +64,11 @@ func (s *MenuService) CreateMenu(ctx context.Context, p models.Principal, ip, ou
 	if next.TrackStock && in.InitialStock == nil {
 		return models.Menu{}, apperror.Invalid(map[string]string{"initial_stock": "required"})
 	}
+	if in.UploadKey != nil {
+		if err := s.media.CheckUpload(ctx, *in.UploadKey); err != nil {
+			return models.Menu{}, err
+		}
+	}
 	menuID := id.New()
 	err = s.db.InTx(ctx, func(ctx context.Context) error {
 		if err := s.categoryOfOutlet(ctx, outletID, next.CategoryID); err != nil {
@@ -73,6 +86,12 @@ func (s *MenuService) CreateMenu(ctx context.Context, p models.Principal, ip, ou
 				return err
 			}
 			after["initial_stock"] = stock
+		}
+		if in.UploadKey != nil {
+			if err := s.media.QueueMenuImage(ctx, outletID, menuID, *in.UploadKey); err != nil {
+				return err
+			}
+			after["image"] = imageNew
 		}
 		return s.audit.Record(ctx, models.AuditEntry{
 			Action: "menu.created", UserID: p.UserID, OutletID: outletID,
@@ -94,6 +113,11 @@ func (s *MenuService) UpdateMenu(ctx context.Context, p models.Principal, ip, ou
 	if err != nil {
 		return models.Menu{}, err
 	}
+	if in.UploadKey != nil {
+		if err := s.media.CheckUpload(ctx, *in.UploadKey); err != nil {
+			return models.Menu{}, err
+		}
+	}
 	err = s.db.InTx(ctx, func(ctx context.Context) error {
 		prev, err := s.menus.Lock(ctx, outletID, menuID)
 		if err != nil {
@@ -104,6 +128,21 @@ func (s *MenuService) UpdateMenu(ctx context.Context, p models.Principal, ip, ou
 			return apperror.Invalid(map[string]string{"initial_stock": "required"})
 		}
 		before, after := changedAsPrinted(prev.Snapshot(), next.Snapshot())
+		switch {
+		case in.UploadKey != nil:
+			if err := s.media.QueueMenuImage(ctx, outletID, menuID, *in.UploadKey); err != nil {
+				return err
+			}
+			after["image"] = imageNew
+		case in.RemoveImage:
+			removed, err := s.media.RemoveMenuImage(ctx, outletID, menuID)
+			if err != nil {
+				return err
+			}
+			if removed {
+				after["image"] = imageRemoved
+			}
+		}
 		if len(after) == 0 {
 			return nil
 		}

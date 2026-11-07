@@ -19,11 +19,53 @@ import (
 // MenuRepository owns menus, each outlet's menus, with their stock counts.
 type MenuRepository struct {
 	db *config.Database
+	// imageURL is a stored photo's public address; nil without a storage.
+	imageURL func(key string) string
 }
 
 // NewMenuRepository returns the menus' repository.
 func NewMenuRepository(db *config.Database) *MenuRepository {
 	return &MenuRepository{db: db}
+}
+
+// WithImageURLs has the menus it returns say where their photos are shown
+// from, by url.
+func (r *MenuRepository) WithImageURLs(url func(key string) string) *MenuRepository {
+	r.imageURL = url
+	return r
+}
+
+// ImageKey is the menu's photo, nil without one: ErrMenuNotFound if the
+// outlet has no such menu.
+func (r *MenuRepository) ImageKey(ctx context.Context, outletID, menuID string) (*string, error) {
+	key, err := store.New(r.db.Conn(ctx)).GetMenuImageKey(ctx, store.GetMenuImageKeyParams{MenuID: menuID, OutletID: outletID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.ErrMenuNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load menu image %s: %w", menuID, err)
+	}
+	return key, nil
+}
+
+// LockImage is ImageKey, locking the menu for a change of its photo.
+func (r *MenuRepository) LockImage(ctx context.Context, outletID, menuID string) (*string, error) {
+	key, err := store.New(r.db.Conn(ctx)).LockMenuImageKey(ctx, store.LockMenuImageKeyParams{MenuID: menuID, OutletID: outletID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.ErrMenuNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock menu image %s: %w", menuID, err)
+	}
+	return key, nil
+}
+
+// SetImage points the menu at its photo; nil means none.
+func (r *MenuRepository) SetImage(ctx context.Context, menuID string, key *string) error {
+	if err := store.New(r.db.Conn(ctx)).SetMenuImageKey(ctx, store.SetMenuImageKeyParams{MenuID: menuID, ImageKey: key}); err != nil {
+		return fmt.Errorf("set menu image %s: %w", menuID, err)
+	}
+	return nil
 }
 
 // List returns a page of the outlet's menus, in the cashier's order, and
@@ -55,7 +97,7 @@ func (r *MenuRepository) List(ctx context.Context, outletID string, f models.Men
 	}
 	out := make([]models.Menu, len(rows))
 	for i, row := range rows {
-		out[i] = menuFrom(store.GetMenuRow(row))
+		out[i] = r.menuFrom(store.GetMenuRow(row))
 	}
 	return out, int(total), nil
 }
@@ -70,7 +112,7 @@ func (r *MenuRepository) Get(ctx context.Context, outletID, menuID string) (mode
 	if err != nil {
 		return models.Menu{}, fmt.Errorf("load menu %s: %w", menuID, err)
 	}
-	return menuFrom(row), nil
+	return r.menuFrom(row), nil
 }
 
 // Insert stores a new menu of the outlet, its stock at 0: ErrMenuSKUTaken
@@ -142,7 +184,7 @@ func (r *MenuRepository) ListForCashier(ctx context.Context, outletID string) ([
 	}
 	out := make([]models.Menu, len(rows))
 	for i, row := range rows {
-		out[i] = menuFrom(store.GetMenuRow(row))
+		out[i] = r.menuFrom(store.GetMenuRow(row))
 	}
 	return out, nil
 }
@@ -173,7 +215,16 @@ func skuTaken(err error) error {
 	return err
 }
 
-func menuFrom(row store.GetMenuRow) models.Menu {
+func (r *MenuRepository) menuFrom(row store.GetMenuRow) models.Menu {
+	m := menuRow(row)
+	if r.imageURL != nil && m.ImageKey != nil {
+		image, thumb := r.imageURL(*m.ImageKey), r.imageURL(models.MenuThumbKey(*m.ImageKey))
+		m.ImageURL, m.ImageThumbURL = &image, &thumb
+	}
+	return m
+}
+
+func menuRow(row store.GetMenuRow) models.Menu {
 	return models.Menu{
 		MenuID: row.MenuID, Name: row.Name, Description: row.Description, SKU: row.Sku, Price: row.Price, ImageKey: row.ImageKey,
 		TrackStock: row.TrackStock, StockQty: int(row.StockQty), StockAlert: intPtr(row.StockAlert), StockStatus: row.StockStatus,
@@ -198,4 +249,21 @@ func int32Ptr(v *int) *int32 {
 	}
 	n := int32(*v) //nolint:gosec // callers cap it at MaxStock
 	return &n
+}
+
+// LowStock returns the outlets' menus at or below their alert, or out of
+// stock, the emptiest first, at most 50.
+func (r *MenuRepository) LowStock(ctx context.Context, outletIDs []string) ([]models.LowStockMenu, error) {
+	rows, err := store.New(r.db.Conn(ctx)).ListLowStockMenus(ctx, outletIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list the low stock menus: %w", err)
+	}
+	out := make([]models.LowStockMenu, len(rows))
+	for i, row := range rows {
+		out[i] = models.LowStockMenu{
+			MenuID: row.MenuID, OutletID: row.OutletID, Name: row.Name, StockQty: int(row.StockQty),
+			StockAlert: intPtr(row.StockAlert), StockStatus: row.StockStatus,
+		}
+	}
+	return out, nil
 }

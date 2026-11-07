@@ -211,6 +211,23 @@ func (q *Queries) GetMenu(ctx context.Context, arg GetMenuParams) (GetMenuRow, e
 	return i, err
 }
 
+const getMenuImageKey = `-- name: GetMenuImageKey :one
+SELECT image_key FROM menus
+WHERE menu_id = $1 AND outlet_id = $2 AND deleted_at IS NULL
+`
+
+type GetMenuImageKeyParams struct {
+	MenuID   string
+	OutletID string
+}
+
+func (q *Queries) GetMenuImageKey(ctx context.Context, arg GetMenuImageKeyParams) (*string, error) {
+	row := q.db.QueryRow(ctx, getMenuImageKey, arg.MenuID, arg.OutletID)
+	var image_key *string
+	err := row.Scan(&image_key)
+	return image_key, err
+}
+
 const insertCategory = `-- name: InsertCategory :exec
 INSERT INTO menu_categories (category_id, outlet_id, name, icon, sort_order)
 VALUES ($1, $2, $3, $4, $5)
@@ -356,6 +373,54 @@ func (q *Queries) ListCategories(ctx context.Context, arg ListCategoriesParams) 
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.MenuCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLowStockMenus = `-- name: ListLowStockMenus :many
+SELECT m.menu_id, m.outlet_id, m.name, m.stock_qty, m.stock_alert,
+    menu_stock_status(m.track_stock, m.stock_qty, m.stock_alert)::text AS stock_status
+FROM menus m
+WHERE m.outlet_id = ANY ($1::text[]) AND m.deleted_at IS NULL AND m.is_active
+    AND menu_stock_status(m.track_stock, m.stock_qty, m.stock_alert) IN ('low', 'out')
+ORDER BY m.stock_qty, lower(m.name), m.menu_id
+LIMIT 50
+`
+
+type ListLowStockMenusRow struct {
+	MenuID      string
+	OutletID    string
+	Name        string
+	StockQty    int32
+	StockAlert  *int32
+	StockStatus string
+}
+
+// The dashboards' menus at or below their stock alert, or out of stock:
+// the emptiest first.
+func (q *Queries) ListLowStockMenus(ctx context.Context, outletIds []string) ([]ListLowStockMenusRow, error) {
+	rows, err := q.db.Query(ctx, listLowStockMenus, outletIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLowStockMenusRow
+	for rows.Next() {
+		var i ListLowStockMenusRow
+		if err := rows.Scan(
+			&i.MenuID,
+			&i.OutletID,
+			&i.Name,
+			&i.StockQty,
+			&i.StockAlert,
+			&i.StockStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -763,6 +828,24 @@ func (q *Queries) LockMenu(ctx context.Context, arg LockMenuParams) (LockMenuRow
 	return i, err
 }
 
+const lockMenuImageKey = `-- name: LockMenuImageKey :one
+SELECT image_key FROM menus
+WHERE menu_id = $1 AND outlet_id = $2 AND deleted_at IS NULL
+FOR UPDATE
+`
+
+type LockMenuImageKeyParams struct {
+	MenuID   string
+	OutletID string
+}
+
+func (q *Queries) LockMenuImageKey(ctx context.Context, arg LockMenuImageKeyParams) (*string, error) {
+	row := q.db.QueryRow(ctx, lockMenuImageKey, arg.MenuID, arg.OutletID)
+	var image_key *string
+	err := row.Scan(&image_key)
+	return image_key, err
+}
+
 const lockMenusForSale = `-- name: LockMenusForSale :many
 SELECT m.menu_id, m.name, m.price, m.track_stock, m.stock_qty,
     (m.is_active AND c.is_active AND c.deleted_at IS NULL)::boolean AS available
@@ -873,6 +956,21 @@ type SetMenuActiveParams struct {
 
 func (q *Queries) SetMenuActive(ctx context.Context, arg SetMenuActiveParams) error {
 	_, err := q.db.Exec(ctx, setMenuActive, arg.IsActive, arg.MenuID)
+	return err
+}
+
+const setMenuImageKey = `-- name: SetMenuImageKey :exec
+UPDATE menus SET image_key = $1, updated_at = now()
+WHERE menu_id = $2
+`
+
+type SetMenuImageKeyParams struct {
+	ImageKey *string
+	MenuID   string
+}
+
+func (q *Queries) SetMenuImageKey(ctx context.Context, arg SetMenuImageKeyParams) error {
+	_, err := q.db.Exec(ctx, setMenuImageKey, arg.ImageKey, arg.MenuID)
 	return err
 }
 

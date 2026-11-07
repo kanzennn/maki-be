@@ -376,6 +376,34 @@ password never appears in an entry.
 | Errors | One envelope with a stable `code`; anything unexpected is a generic 500, with the details in the log |
 | Logs | One line per request: the route pattern (never the raw path), status, latency, client IP, request ID and user ID. Never a body, password or token. The development log mailer prints emails, links included, and is refused outside development |
 
+## Uploads and photos
+
+- Uploads land only in the private bucket, by a presigned `PUT` with the type
+  and the exact size signed in, good for 5 minutes. Anyone signed in may ask
+  for one: it can't be read, it is gone in a day, and the routes that claim one
+  check who may change what.
+- A key is only claimed if it has the shape `uploads/{cuid}`, as a claimed
+  object ends up deleted.
+- Nothing trusts the declared type. The worker reads the header (format, at
+  most 8000 × 8000) before opening a file, then libvips decodes it. An SVG or a
+  decompression bomb never reaches the decoder.
+- EXIF, GPS included, and XMP are removed from every stored photo, by our own
+  code after the conversion (`dropWebPMetadata`), and tested against real
+  libvips. The raw upload never reaches the public bucket.
+- Profile photos stay private, read through addresses good for an hour.
+- The private bucket's CORS allows `PUT` only, from the web app's origins. No
+  token or cookie goes to the storage.
+- **Not tested against a real bucket yet**: a provider's signature checks and
+  CORS can only be seen there.
+
+## Realtime
+
+A connection needs a ticket: one connection, one outlet, 30 seconds, issued
+behind the usual sign-in and outlet scope, so no token sits in a URL that lasts.
+The upgrade checks the `Origin` against the API's own host and
+`CORS_ALLOWED_ORIGINS`. A message says only what changed. A connection ends
+after 15 minutes, and a new ticket needs a live session.
+
 ## Not built yet
 
 - Offline sign-in and sync on the till, which change what a device's token

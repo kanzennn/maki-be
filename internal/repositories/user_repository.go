@@ -21,6 +21,8 @@ import (
 // user_roles, the custom role each staff member holds.
 type UserRepository struct {
 	db *config.Database
+	// photoURL signs a stored photo's address; nil without a storage.
+	photoURL func(ctx context.Context, key string) (string, error)
 }
 
 // NewUserRepository returns the accounts' repository.
@@ -48,6 +50,19 @@ func (r *UserRepository) OwnerByLogin(ctx context.Context, login string) (models
 // OwnerExists reports whether the Owner account exists.
 func (r *UserRepository) OwnerExists(ctx context.Context) (bool, error) {
 	return store.New(r.db.Conn(ctx)).OwnerExists(ctx)
+}
+
+// Labels returns who the accounts are, by user ID, deleted ones too.
+func (r *UserRepository) Labels(ctx context.Context, userIDs []string) (map[string]models.LogUser, error) {
+	rows, err := store.New(r.db.Conn(ctx)).ListUserLabels(ctx, userIDs)
+	if err != nil {
+		return nil, fmt.Errorf("label users: %w", err)
+	}
+	out := make(map[string]models.LogUser, len(rows))
+	for _, row := range rows {
+		out[row.UserID] = models.LogUser(row)
+	}
+	return out, nil
 }
 
 // Names returns the names of the accounts, by user ID, deleted ones
@@ -141,6 +156,60 @@ func (r *UserRepository) InsertOwner(ctx context.Context, o models.NewOwner) err
 	return err
 }
 
+// WithPhotoURLs has the accounts it returns say where their photos are read
+// from, by url.
+func (r *UserRepository) WithPhotoURLs(url func(ctx context.Context, key string) (string, error)) *UserRepository {
+	r.photoURL = url
+	return r
+}
+
+// PhotoURL is a short-lived address of the photo; nil without one, or without
+// a storage to read it from. Failing to sign one costs the picture, not the
+// page: the app shows the initials instead.
+func (r *UserRepository) PhotoURL(ctx context.Context, key *string) *string {
+	if r.photoURL == nil || key == nil {
+		return nil
+	}
+	url, err := r.photoURL(ctx, *key)
+	if err != nil {
+		return nil
+	}
+	return &url
+}
+
+// PhotoKey is the user's photo, nil without one: ErrUserNotFound if they're
+// gone.
+func (r *UserRepository) PhotoKey(ctx context.Context, userID string) (*string, error) {
+	key, err := store.New(r.db.Conn(ctx)).GetUserPhotoKey(ctx, userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load user photo %s: %w", userID, err)
+	}
+	return key, nil
+}
+
+// LockPhoto is PhotoKey, locking the user for a change of their photo.
+func (r *UserRepository) LockPhoto(ctx context.Context, userID string) (*string, error) {
+	key, err := store.New(r.db.Conn(ctx)).LockUserPhotoKey(ctx, userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock user photo %s: %w", userID, err)
+	}
+	return key, nil
+}
+
+// SetPhoto points the user at their photo; nil means none.
+func (r *UserRepository) SetPhoto(ctx context.Context, userID string, key *string) error {
+	if err := store.New(r.db.Conn(ctx)).SetUserPhotoKey(ctx, store.SetUserPhotoKeyParams{UserID: userID, PhotoKey: key}); err != nil {
+		return fmt.Errorf("set user photo %s: %w", userID, err)
+	}
+	return nil
+}
+
 // ListStaff returns a page of the outlet's users, by name, and how many
 // match in all.
 func (r *UserRepository) ListStaff(ctx context.Context, outletID string, f models.StaffFilter, page pagination.Page) ([]models.Staff, int, error) {
@@ -163,7 +232,7 @@ func (r *UserRepository) ListStaff(ctx context.Context, outletID string, f model
 	}
 	out := make([]models.Staff, len(rows))
 	for i, row := range rows {
-		out[i] = staffFrom(store.GetOutletUserRow(row))
+		out[i] = r.staffFrom(ctx, store.GetOutletUserRow(row))
 	}
 	return out, int(total), nil
 }
@@ -181,7 +250,7 @@ func (r *UserRepository) Staff(ctx context.Context, outletID, userID string) (mo
 	if err != nil {
 		return models.Staff{}, fmt.Errorf("load user %s: %w", userID, err)
 	}
-	return staffFrom(row), nil
+	return r.staffFrom(ctx, row), nil
 }
 
 // LockStaff locks one of the outlet's users for a change: ErrUserNotFound if
@@ -265,6 +334,7 @@ func oneUser(row store.User, err error) (models.User, error) {
 		Email:              row.Email,
 		EmailVerifiedAt:    row.EmailVerifiedAt,
 		Locale:             row.Locale,
+		PhotoKey:           row.PhotoKey,
 		PasswordHash:       row.PasswordHash,
 		MustChangePassword: row.MustChangePassword,
 		IsOwner:            row.IsOwner,
@@ -274,9 +344,10 @@ func oneUser(row store.User, err error) (models.User, error) {
 	}, nil
 }
 
-func staffFrom(row store.GetOutletUserRow) models.Staff {
+func (r *UserRepository) staffFrom(ctx context.Context, row store.GetOutletUserRow) models.Staff {
 	s := models.Staff{
 		UserID: row.UserID, Name: row.Name, Username: row.Username, Email: row.Email, Phone: row.Phone,
+		PhotoURL:  r.PhotoURL(ctx, row.PhotoKey),
 		IsManager: row.IsManager, Active: row.Status == "active", MustChangePassword: row.MustChangePassword,
 		LastLoginAt: row.LastLoginAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 	}

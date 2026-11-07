@@ -67,7 +67,8 @@ The resources so far are auth, user (with roles, staff and the permission
 catalog), outlet, menu (categories, menus and their stock), device, payment,
 voucher, table (areas, tables, layouts, schedules and the dine-in mode),
 order (the cashier: its catalog and device, checkout, orders and voids), and
-audit, the spec's log. Planned, from the spec: sync and upload. How sign-in
+audit, the spec's log, with payment control, the dashboard, realtime and
+upload. Planned, from the spec: sync. How sign-in
 and permissions work, and the security baseline as shipped, is in
 [security.md](./security.md).
 
@@ -571,6 +572,78 @@ resources reach it through its service.
   `table_schedule.created`, `.updated`, `.cancelled`, and
   `dine_in_mode.updated` (with the mode before).
 
+## Payment Control, the Log Action, the dashboard
+
+- **Payment Control** (`GET`/`PUT /outlets/{oid}/payment-methods`,
+  `payment.manage`): cash can't be turned off (`payment_method_required`), and
+  a method not released yet can't be turned on
+  (`payment_method_coming_soon`). A change logs `payment.updated`.
+- **The Log Action read back** (`GET /owner/logs`, `GET /outlets/{oid}/logs`,
+  `log.view`): filtered by date, action, outlet, user and Self, a page at a
+  time. An outlet's reader sees that outlet's rows only.
+- **The dashboard** (`GET /owner/dashboard`, `GET /outlets/{oid}/dashboard`,
+  `dashboard.view`): a day is the outlet's own, in its time zone, by
+  `client_created_at`. Figures come from `paid` orders, with voids apart, and
+  each compares with the period of the same length before it. At most 366 days.
+
+## Realtime
+
+One hub per api process, in memory (`utils/realtime`), one channel per outlet.
+A message says only what changed, `{"topics": ["catalog"]}`, and the client
+loads that again itself: the messages carry nothing a reader may not see, and
+the one source of truth stays the API. The topics are `catalog`, `tables` and
+`orders`.
+
+- **The tickets.** A browser can't send `Authorization` on a WebSocket, so a
+  client asks `POST /outlets/{oid}/realtime/ticket` as usual and connects to
+  `GET /outlets/{oid}/realtime?ticket=…`. A ticket is for one connection, to
+  that outlet, for 30 seconds.
+- **What publishes.** The `PublishChanges` middleware, on the owner and outlet
+  route groups: a successful write publishes the topics
+  `routes/realtime_routes.go` names for its route. So a job's change doesn't
+  publish: the worker is another process. A new photo shows on the next load.
+- **Ending.** The server pings every 30 seconds and ends a connection after 15
+  minutes with close code 4000, on which the client connects again at once
+  with a new ticket, so a revoked session doesn't keep listening. After any
+  reconnection a client reloads everything, as messages may have gone unheard.
+- **More than one api** needs a shared channel (the spec's LISTEN/NOTIFY): a
+  second instance wouldn't hear the first's writes.
+
+## Photos
+
+Files never pass through the API. `utils/storage.Storage` is one bucket, with
+an adapter for the S3 protocol and an in-memory fake; `cmd/api` and `cmd/worker`
+open two from the `STORAGE_` variables, all of them or none. Without them,
+asking for an upload or sending a key answers `storage_unavailable` (503), and
+everything else works.
+
+1. `POST /uploads/presign` checks the purpose, the type and the size, and
+   returns a presigned `PUT` to the private bucket, `uploads/{cuid}`, for 5
+   minutes, with the type and the exact size signed in.
+2. The client saves with `upload_key` (`POST`/`PUT` of a menu or a user, or
+   `PUT /me/photo`). The service checks that the key is the shape of an upload's,
+   so nothing else can be claimed and later deleted, and that the upload is
+   there (`upload_not_found`), then queues a job in the transaction of the save.
+   `remove_image`, `remove_photo` and `DELETE /me/photo` take a photo away.
+3. The worker (`jobs/media_jobs.go`) reads at most 2 MB, reads the header in
+   Go (`utils/imaging.Inspect`: JPG, PNG or WebP, at most 8000 × 8000) before
+   opening anything, and converts with libvips: EXIF orientation applied, cut
+   from the centre, never enlarged, WebP. A menu gets 800 × 800 and 200 × 200
+   (`{cuid}_thumb.webp`) in the public bucket; a user 400 × 400 in the private
+   one. `dropWebPMetadata` then removes the EXIF and XMP chunks itself, as
+   libvips 8.14 writes EXIF despite its `strip` option.
+4. One transaction sets `image_key` or `photo_key` and queues the deletion of
+   the upload and the replaced objects, as jobs of their own. A job cut off
+   anywhere runs again safely: the object names come from the upload, and it
+   checks the row first. A file that can't be a photo is logged and deleted, not
+   retried, and the row keeps the photo it has.
+5. The worker sweeps uploads over 24 hours old, at its start and every hour.
+
+The API answers `image_url` and `image_thumb_url` (base URL + key) and
+`photo_url` (a presigned `GET`, good for an hour). `utils/imaging` builds with
+libvips only under the `vips` tag; `cmd/api` never imports it, nor `jobs`, which
+`TestOnlyTheWorkerReachesImages` holds to.
+
 ## Background jobs (outbox)
 
 Work that follows a committed change but needn't finish before the response
@@ -624,6 +697,9 @@ WHERE outbox_job_id = '…';
 ## Testing
 
 - `go test ./...` runs every test, integration tests included.
+- The photo conversion needs libvips, and runs apart, in CI and in a container:
+  `go test -tags vips ./internal/utils/imaging/`. The rest of photos runs in
+  `go test ./...`, with in-memory buckets and a stand-in converter.
 - Integration tests live in `internal/tests/<resource>/`. Each folder's
   harness wires the real routes, middleware, controllers, services and
   repositories, as `cmd/api` does, and drives the endpoints over HTTP; an

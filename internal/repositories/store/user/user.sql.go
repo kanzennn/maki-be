@@ -145,6 +145,7 @@ SELECT u.user_id,
        u.username,
        u.email,
        u.phone,
+       u.photo_key,
        u.is_manager,
        u.status,
        u.must_change_password,
@@ -172,6 +173,7 @@ type GetOutletUserRow struct {
 	Username           string
 	Email              *string
 	Phone              *string
+	PhotoKey           *string
 	IsManager          bool
 	Status             string
 	MustChangePassword bool
@@ -191,6 +193,7 @@ func (q *Queries) GetOutletUser(ctx context.Context, arg GetOutletUserParams) (G
 		&i.Username,
 		&i.Email,
 		&i.Phone,
+		&i.PhotoKey,
 		&i.IsManager,
 		&i.Status,
 		&i.MustChangePassword,
@@ -384,6 +387,18 @@ func (q *Queries) GetUserPermissions(ctx context.Context, userID string) ([]stri
 	return items, nil
 }
 
+const getUserPhotoKey = `-- name: GetUserPhotoKey :one
+SELECT photo_key FROM users
+WHERE user_id = $1 AND deleted_at IS NULL
+`
+
+func (q *Queries) GetUserPhotoKey(ctx context.Context, userID string) (*string, error) {
+	row := q.db.QueryRow(ctx, getUserPhotoKey, userID)
+	var photo_key *string
+	err := row.Scan(&photo_key)
+	return photo_key, err
+}
+
 const getUserRoleID = `-- name: GetUserRoleID :one
 SELECT COALESCE((SELECT role_id FROM user_roles WHERE user_id = $1), '')::text AS role_id
 `
@@ -534,6 +549,7 @@ SELECT u.user_id,
        u.username,
        u.email,
        u.phone,
+       u.photo_key,
        u.is_manager,
        u.status,
        u.must_change_password,
@@ -571,6 +587,7 @@ type ListOutletUsersRow struct {
 	Username           string
 	Email              *string
 	Phone              *string
+	PhotoKey           *string
 	IsManager          bool
 	Status             string
 	MustChangePassword bool
@@ -606,6 +623,7 @@ func (q *Queries) ListOutletUsers(ctx context.Context, arg ListOutletUsersParams
 			&i.Username,
 			&i.Email,
 			&i.Phone,
+			&i.PhotoKey,
 			&i.IsManager,
 			&i.Status,
 			&i.MustChangePassword,
@@ -716,6 +734,50 @@ func (q *Queries) ListRoles(ctx context.Context, arg ListRolesParams) ([]ListRol
 			&i.UpdatedAt,
 			&i.UserCount,
 			&i.Permissions,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUserLabels = `-- name: ListUserLabels :many
+SELECT u.user_id, u.name, u.is_owner, u.is_manager, r.name AS role_name
+FROM users u
+LEFT JOIN user_roles ur ON ur.user_id = u.user_id
+LEFT JOIN roles r ON r.role_id = ur.role_id
+WHERE u.user_id = ANY ($1::text[])
+`
+
+type ListUserLabelsRow struct {
+	UserID    string
+	Name      string
+	IsOwner   bool
+	IsManager bool
+	RoleName  *string
+}
+
+// Who an account is, for the Log Action: deleted accounts too, and the name
+// of a staff member's role.
+func (q *Queries) ListUserLabels(ctx context.Context, userIds []string) ([]ListUserLabelsRow, error) {
+	rows, err := q.db.Query(ctx, listUserLabels, userIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserLabelsRow
+	for rows.Next() {
+		var i ListUserLabelsRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.Name,
+			&i.IsOwner,
+			&i.IsManager,
+			&i.RoleName,
 		); err != nil {
 			return nil, err
 		}
@@ -839,6 +901,19 @@ func (q *Queries) LockRole(ctx context.Context, arg LockRoleParams) (LockRoleRow
 	return i, err
 }
 
+const lockUserPhotoKey = `-- name: LockUserPhotoKey :one
+SELECT photo_key FROM users
+WHERE user_id = $1 AND deleted_at IS NULL
+FOR UPDATE
+`
+
+func (q *Queries) LockUserPhotoKey(ctx context.Context, userID string) (*string, error) {
+	row := q.db.QueryRow(ctx, lockUserPhotoKey, userID)
+	var photo_key *string
+	err := row.Scan(&photo_key)
+	return photo_key, err
+}
+
 const ownerExists = `-- name: OwnerExists :one
 SELECT EXISTS (SELECT 1 FROM users WHERE is_owner)
 `
@@ -930,6 +1005,21 @@ type SetTemporaryPasswordParams struct {
 // next sign-in.
 func (q *Queries) SetTemporaryPassword(ctx context.Context, arg SetTemporaryPasswordParams) error {
 	_, err := q.db.Exec(ctx, setTemporaryPassword, arg.PasswordHash, arg.UserID)
+	return err
+}
+
+const setUserPhotoKey = `-- name: SetUserPhotoKey :exec
+UPDATE users SET photo_key = $1, updated_at = now()
+WHERE user_id = $2
+`
+
+type SetUserPhotoKeyParams struct {
+	PhotoKey *string
+	UserID   string
+}
+
+func (q *Queries) SetUserPhotoKey(ctx context.Context, arg SetUserPhotoKeyParams) error {
+	_, err := q.db.Exec(ctx, setUserPhotoKey, arg.PhotoKey, arg.UserID)
 	return err
 }
 

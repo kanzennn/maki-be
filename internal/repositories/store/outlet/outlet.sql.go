@@ -267,6 +267,47 @@ func (q *Queries) ListOutletRefs(ctx context.Context, outletIds []string) ([]Lis
 	return items, nil
 }
 
+const listOutletZones = `-- name: ListOutletZones :many
+SELECT outlet_id, code, name, timezone
+FROM outlets
+WHERE deleted_at IS NULL AND ($1::text[] IS NULL OR outlet_id = ANY ($1))
+ORDER BY lower(name), outlet_id
+`
+
+type ListOutletZonesRow struct {
+	OutletID string
+	Code     string
+	Name     string
+	Timezone string
+}
+
+// The outlets a dashboard adds up, each with the time zone its days are in;
+// with no IDs given, every outlet not deleted.
+func (q *Queries) ListOutletZones(ctx context.Context, outletIds []string) ([]ListOutletZonesRow, error) {
+	rows, err := q.db.Query(ctx, listOutletZones, outletIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListOutletZonesRow
+	for rows.Next() {
+		var i ListOutletZonesRow
+		if err := rows.Scan(
+			&i.OutletID,
+			&i.Code,
+			&i.Name,
+			&i.Timezone,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOutlets = `-- name: ListOutlets :many
 SELECT outlet_id, code, name, address, phone, timezone, locale, open_time, close_time, tax_bps, service_bps, status, created_at, updated_at, deleted_at
 FROM outlets

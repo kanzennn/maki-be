@@ -13,7 +13,8 @@ type User struct {
 	// EmailVerifiedAt is set once the address was confirmed.
 	EmailVerifiedAt    *time.Time
 	Locale             *string // their own choice; nil follows the outlet
-	PasswordHash       string  // argon2id, PHC string
+	PhotoKey           *string
+	PasswordHash       string // argon2id, PHC string
 	MustChangePassword bool
 	IsOwner            bool
 	IsManager          bool

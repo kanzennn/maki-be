@@ -68,9 +68,10 @@ type CatalogMenuResponse struct {
 	Description *string `json:"description"`
 	SKU         *string `json:"sku"`
 	Price       int64   `json:"price"`
-	// The photo's CDN address, with the upload milestone; null until then.
-	ImageURL   *string `json:"image_url"`
-	TrackStock bool    `json:"track_stock"`
+	// The photo on the CDN, and its small version; null without one.
+	ImageURL      *string `json:"image_url"`
+	ImageThumbURL *string `json:"image_thumb_url"`
+	TrackStock    bool    `json:"track_stock"`
 	// Null for a menu whose stock isn't tracked: it is always available.
 	StockQty    *int   `json:"stock_qty"`
 	StockAlert  *int   `json:"stock_alert"`
@@ -106,7 +107,7 @@ func NewCatalogResponse(c PosCatalog) CatalogResponse {
 func NewCatalogMenuResponse(m Menu) CatalogMenuResponse {
 	out := CatalogMenuResponse{
 		MenuID: m.MenuID, CategoryID: m.Category.CategoryID, Name: m.Name, Description: m.Description, SKU: m.SKU,
-		Price: m.Price, TrackStock: m.TrackStock, StockStatus: m.StockStatus,
+		Price: m.Price, ImageURL: m.ImageURL, ImageThumbURL: m.ImageThumbURL, TrackStock: m.TrackStock, StockStatus: m.StockStatus,
 	}
 	if m.TrackStock {
 		qty := m.StockQty

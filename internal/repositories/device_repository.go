@@ -160,3 +160,16 @@ func deviceFrom(outletID string, row store.GetDeviceRow) models.Device {
 	}
 	return d
 }
+
+// Refs returns the devices' codes and names by ID, revoked ones too.
+func (r *DeviceRepository) Refs(ctx context.Context, deviceIDs []string) (map[string]models.LogDevice, error) {
+	rows, err := store.New(r.db.Conn(ctx)).ListDeviceRefs(ctx, deviceIDs)
+	if err != nil {
+		return nil, fmt.Errorf("name devices: %w", err)
+	}
+	out := make(map[string]models.LogDevice, len(rows))
+	for _, row := range rows {
+		out[row.DeviceID] = models.LogDevice(row)
+	}
+	return out, nil
+}

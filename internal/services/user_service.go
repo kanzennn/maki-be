@@ -127,3 +127,8 @@ func (s *UserService) Permissions(ctx context.Context, u models.User) (models.Pe
 	}
 	return models.NewPermissions(slices.DeleteFunc(codes, func(c string) bool { return !models.KnownPermission(c) })...), nil
 }
+
+// PhotoURL is a short-lived address of the photo; nil without one.
+func (s *UserService) PhotoURL(ctx context.Context, key *string) *string {
+	return s.users.PhotoURL(ctx, key)
+}

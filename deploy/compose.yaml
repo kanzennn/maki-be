@@ -1,7 +1,7 @@
 # The production stack on the VPS (spec, Infra & deploy): Caddy, serving the
 # web app's files and passing the API to the api, behind the host's Nginx,
 # which holds ports 80 and 443 and the certificate; and the api and the
-# worker from the same maki-be image, on the server's shared PostgreSQL 18.
+# worker from maki-be's two images, on the server's shared PostgreSQL 18.
 # It lives in /srv/maki beside its .env, and deploy.sh runs it: see
 # docs/deployment.md.
 #
@@ -54,8 +54,11 @@ services:
       <<: *backend-env
       HTTP_ADDR: ":8080"
 
+  # Its own image: it converts photos with libvips, which the api's static one
+  # hasn't got.
   worker:
     <<: *backend
+    image: ${MAKI_WORKER_IMAGE:?deploy.sh sets it in release.env}
     command: ["worker"]
 
   # pg_dump and pg_restore for backup.sh and the restore

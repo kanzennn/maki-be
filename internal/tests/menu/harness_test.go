@@ -86,7 +86,7 @@ func newHarness(t *testing.T) *harness {
 	scoped := protected.Group("/outlets/:oid", middlewares.OutletScope(dbOutlets{pool}, logger))
 	routes.RegisterMenuRoutes(scoped,
 		controllers.NewCategoryController(services.NewCategoryService(db, categories, audit)),
-		controllers.NewMenuController(services.NewMenuService(db, menus, categories, stock, audit)),
+		controllers.NewMenuController(services.NewMenuService(db, menus, categories, stock, audit, nil)),
 		controllers.NewStockController(services.NewStockService(db, menus, stock, users, audit)))
 
 	h := &harness{t: t, pool: pool, router: r}

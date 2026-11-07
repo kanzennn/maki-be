@@ -261,3 +261,17 @@ func hhmm(t pgtype.Time) *string {
 	s := fmt.Sprintf("%02d:%02d", minutes/60, minutes%60)
 	return &s
 }
+
+// Zones returns the outlets a dashboard adds up, by name: those with the IDs,
+// or with none given, every outlet not deleted. Deleted ones are left out.
+func (r *OutletRepository) Zones(ctx context.Context, outletIDs []string) ([]models.OutletZone, error) {
+	rows, err := store.New(r.db.Conn(ctx)).ListOutletZones(ctx, outletIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list the outlets' time zones: %w", err)
+	}
+	out := make([]models.OutletZone, len(rows))
+	for i, row := range rows {
+		out[i] = models.OutletZone(row)
+	}
+	return out, nil
+}

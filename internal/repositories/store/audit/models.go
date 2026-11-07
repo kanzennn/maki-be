@@ -3,3 +3,23 @@
 //   sqlc v1.31.1
 
 package store
+
+import (
+	"net/netip"
+	"time"
+)
+
+type ActionLog struct {
+	ActionLogID string
+	OutletID    *string
+	UserID      *string
+	DeviceID    *string
+	Action      string
+	TargetType  *string
+	TargetID    *string
+	BeforeJSON  []byte
+	AfterJSON   []byte
+	IP          *netip.Addr
+	OccurredAt  time.Time
+	CreatedAt   time.Time
+}

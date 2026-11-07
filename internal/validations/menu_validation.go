@@ -21,6 +21,8 @@ type MenuRequest struct {
 	InitialStock *int    `json:"initial_stock"`
 	StockAlert   *int    `json:"stock_alert"`
 	IsActive     *bool   `json:"is_active"`
+	UploadKey    *string `json:"upload_key" binding:"omitempty,max=64"`
+	RemoveImage  bool    `json:"remove_image"`
 }
 
 // Input converts the request.
@@ -28,6 +30,7 @@ func (r MenuRequest) Input() models.MenuInput {
 	return models.MenuInput{
 		Name: r.Name, CategoryID: r.CategoryID, Price: r.Price, Description: r.Description, SKU: r.SKU,
 		TrackStock: r.TrackStock, InitialStock: r.InitialStock, StockAlert: r.StockAlert, Active: r.IsActive,
+		UploadKey: r.UploadKey, RemoveImage: r.RemoveImage,
 	}
 }
 

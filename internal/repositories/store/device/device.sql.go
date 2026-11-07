@@ -152,6 +152,39 @@ func (q *Queries) InsertDevice(ctx context.Context, arg InsertDeviceParams) erro
 	return err
 }
 
+const listDeviceRefs = `-- name: ListDeviceRefs :many
+SELECT device_id, code, name
+FROM devices
+WHERE device_id = ANY ($1::text[])
+`
+
+type ListDeviceRefsRow struct {
+	DeviceID string
+	Code     string
+	Name     string
+}
+
+// Names devices for the Log Action, revoked ones too.
+func (q *Queries) ListDeviceRefs(ctx context.Context, deviceIds []string) ([]ListDeviceRefsRow, error) {
+	rows, err := q.db.Query(ctx, listDeviceRefs, deviceIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDeviceRefsRow
+	for rows.Next() {
+		var i ListDeviceRefsRow
+		if err := rows.Scan(&i.DeviceID, &i.Code, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDevices = `-- name: ListDevices :many
 SELECT device_id, code, name, platform, activated_by, last_seen_at, revoked_at, revoked_by, created_at
 FROM devices

@@ -34,6 +34,7 @@ type Config struct {
 	// https://admin.example.com.
 	WebBaseURL string
 	SMTP       SMTP
+	Storage    Storage
 }
 
 // minJWTSecret matches jwt.MinSecretLength; config, the bottom layer, can't
@@ -53,6 +54,24 @@ type SMTP struct {
 	Password string
 	From     string // sender, as "Name <address>"
 }
+
+// Storage is the object storage, on any provider that speaks the S3 protocol.
+// Without an Endpoint the deployment has no storage: everything works but
+// photos.
+type Storage struct {
+	Endpoint       string
+	Region         string
+	PublicBucket   string
+	PrivateBucket  string
+	AccessKey      string
+	SecretKey      string
+	ForcePathStyle bool
+	// PublicBaseURL is the CDN in front of the public bucket.
+	PublicBaseURL string
+}
+
+// Enabled reports whether a storage is configured.
+func (s Storage) Enabled() bool { return s.Endpoint != "" }
 
 // SMTP TLS modes.
 const (
@@ -125,6 +144,9 @@ func Load() (Config, error) {
 	var smtpErrs []error
 	cfg.SMTP, smtpErrs = loadSMTP(cfg.IsDevelopment())
 	errs = append(errs, smtpErrs...)
+	var storageErrs []error
+	cfg.Storage, storageErrs = loadStorage()
+	errs = append(errs, storageErrs...)
 
 	if err := errors.Join(errs...); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration:\n%w", err)
@@ -177,6 +199,61 @@ func databaseURLFromParts() (string, []error) {
 		u.RawQuery = url.Values{"sslmode": {sslmode}}.Encode()
 	}
 	return u.String(), nil
+}
+
+// loadStorage reads the STORAGE_ variables: all of them or none.
+func loadStorage() (Storage, []error) {
+	s := Storage{
+		Endpoint:      os.Getenv("STORAGE_ENDPOINT"),
+		Region:        os.Getenv("STORAGE_REGION"),
+		PublicBucket:  os.Getenv("STORAGE_PUBLIC_BUCKET"),
+		PrivateBucket: os.Getenv("STORAGE_PRIVATE_BUCKET"),
+		AccessKey:     os.Getenv("STORAGE_ACCESS_KEY"),
+		SecretKey:     os.Getenv("STORAGE_SECRET_KEY"),
+		PublicBaseURL: os.Getenv("STORAGE_PUBLIC_BASE_URL"),
+	}
+	required := map[string]string{
+		"STORAGE_ENDPOINT": s.Endpoint, "STORAGE_REGION": s.Region, "STORAGE_PUBLIC_BUCKET": s.PublicBucket,
+		"STORAGE_PRIVATE_BUCKET": s.PrivateBucket, "STORAGE_ACCESS_KEY": s.AccessKey, "STORAGE_SECRET_KEY": s.SecretKey,
+		"STORAGE_PUBLIC_BASE_URL": s.PublicBaseURL,
+	}
+	var missing []string
+	for name, value := range required {
+		if value == "" {
+			missing = append(missing, name)
+		}
+	}
+	var errs []error
+	if len(missing) > 0 && len(missing) < len(required) {
+		slices.Sort(missing)
+		errs = append(errs, fmt.Errorf("the object storage needs all its variables or none; missing: %s", strings.Join(missing, ", ")))
+	}
+	if len(missing) == 0 {
+		if err := validateStorageURL(s.Endpoint); err != nil {
+			errs = append(errs, fmt.Errorf("STORAGE_ENDPOINT: %w", err))
+		}
+		if err := validateStorageURL(s.PublicBaseURL); err != nil {
+			errs = append(errs, fmt.Errorf("STORAGE_PUBLIC_BASE_URL: %w", err))
+		}
+	}
+	if raw := os.Getenv("STORAGE_FORCE_PATH_STYLE"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("STORAGE_FORCE_PATH_STYLE must be true or false, got %q", raw))
+		}
+		s.ForcePathStyle = v
+	}
+	return s, errs
+}
+
+// validateStorageURL checks for an http or https address, without printing
+// it back: it might hold a credential by mistake.
+func validateStorageURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("must be an http or https URL")
+	}
+	return nil
 }
 
 func loadSMTP(development bool) (SMTP, []error) {

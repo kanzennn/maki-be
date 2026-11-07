@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/kervzent/maki-be/internal/config"
+	"github.com/kervzent/maki-be/internal/models"
 	store "github.com/kervzent/maki-be/internal/repositories/store/payment"
 )
 
@@ -48,4 +49,42 @@ func (r *PaymentRepository) IsEnabled(ctx context.Context, outletID, method stri
 		return false, fmt.Errorf("check payment method %s of %s: %w", method, outletID, err)
 	}
 	return ok, nil
+}
+
+// List returns every method of the outlet and whether it is on, in order.
+func (r *PaymentRepository) List(ctx context.Context, outletID string) ([]models.PaymentMethod, error) {
+	rows, err := store.New(r.db.Conn(ctx)).ListMethods(ctx, outletID)
+	if err != nil {
+		return nil, fmt.Errorf("list the payment methods of %s: %w", outletID, err)
+	}
+	out := make([]models.PaymentMethod, len(rows))
+	for i, row := range rows {
+		out[i] = models.PaymentMethod{Method: row.Method, Enabled: row.IsEnabled}
+	}
+	return out, nil
+}
+
+// Lock returns List's answer with the rows locked, in the transaction ctx
+// carries, so changes made together each see the one before.
+func (r *PaymentRepository) Lock(ctx context.Context, outletID string) ([]models.PaymentMethod, error) {
+	rows, err := store.New(r.db.Conn(ctx)).LockMethods(ctx, outletID)
+	if err != nil {
+		return nil, fmt.Errorf("lock the payment methods of %s: %w", outletID, err)
+	}
+	out := make([]models.PaymentMethod, len(rows))
+	for i, row := range rows {
+		out[i] = models.PaymentMethod{Method: row.Method, Enabled: row.IsEnabled}
+	}
+	return out, nil
+}
+
+// Set turns the outlet's method on or off.
+func (r *PaymentRepository) Set(ctx context.Context, outletID string, m models.PaymentMethod) error {
+	err := store.New(r.db.Conn(ctx)).SetMethodEnabled(ctx, store.SetMethodEnabledParams{
+		OutletID: outletID, Method: m.Method, IsEnabled: m.Enabled,
+	})
+	if err != nil {
+		return fmt.Errorf("set payment method %s of %s: %w", m.Method, outletID, err)
+	}
+	return nil
 }

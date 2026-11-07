@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/netip"
+	"time"
 
 	"github.com/kervzent/maki-be/internal/config"
 	"github.com/kervzent/maki-be/internal/models"
 	store "github.com/kervzent/maki-be/internal/repositories/store/audit"
+	"github.com/kervzent/maki-be/internal/utils/pagination"
 )
 
 // AuditRepository owns action_logs, the Log Action entries. The rows are
@@ -70,4 +73,45 @@ func marshal(v any) ([]byte, error) {
 		return nil, nil
 	}
 	return json.Marshal(v)
+}
+
+// List returns a page of the entries the filter leaves, newest first, and how
+// many there are. Who, where and which device are named by ID only.
+func (r *AuditRepository) List(ctx context.Context, f models.LogFilter, page pagination.Page) ([]models.ActionLog, int, error) {
+	q := store.New(r.db.Conn(ctx))
+	var fromAt, toAt *time.Time
+	if !f.From.IsZero() {
+		fromAt = &f.From
+	}
+	if !f.To.IsZero() {
+		toAt = &f.To
+	}
+	userID := optional(f.UserID)
+	total, err := q.CountActionLogs(ctx, store.CountActionLogsParams{
+		FromAt: fromAt, ToAt: toAt, Actions: f.Actions, OutletIds: f.OutletIDs, UserID: userID,
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("count the Log Action: %w", err)
+	}
+	rows, err := q.ListActionLogs(ctx, store.ListActionLogsParams{
+		FromAt: fromAt, ToAt: toAt, Actions: f.Actions, OutletIds: f.OutletIDs, UserID: userID,
+		PageOffset: int32(min(page.Offset(), math.MaxInt32)), //nolint:gosec // capped above
+		PageSize:   int32(page.Size),                         //nolint:gosec // BindPage caps it at MaxPageSize
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("list the Log Action: %w", err)
+	}
+	out := make([]models.ActionLog, len(rows))
+	for i, row := range rows {
+		out[i] = models.ActionLog{
+			ActionLogID: row.ActionLogID, OutletID: row.OutletID, UserID: row.UserID, DeviceID: row.DeviceID,
+			Action: row.Action, TargetType: row.TargetType, TargetID: row.TargetID,
+			Before: row.BeforeJSON, After: row.AfterJSON, OccurredAt: row.OccurredAt, CreatedAt: row.CreatedAt,
+		}
+		if row.IP != nil {
+			ip := row.IP.String()
+			out[i].IP = &ip
+		}
+	}
+	return out, int(total), nil
 }
