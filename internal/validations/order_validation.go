@@ -38,8 +38,9 @@ type OrderItemRequest struct {
 
 // OrderPaymentRequest is how CreateOrderRequest is paid.
 type OrderPaymentRequest struct {
-	Method   string `json:"method"`
-	Received *int64 `json:"received"`
+	Method    string  `json:"method"`
+	Received  *int64  `json:"received"`
+	Reference *string `json:"reference"`
 }
 
 // Input converts the request.
@@ -77,6 +78,11 @@ var orderNoPattern = regexp.MustCompile(`^([A-Z0-9]{2,10}-K[0-9]{2,4})-([0-9]{8}
 // standNumberPattern is orders_stand_number_check's rule: 1 to 10 capitals,
 // digits and hyphens, a hyphen only between them, as 12, A5 or B-3.
 var standNumberPattern = regexp.MustCompile(`^[A-Z0-9]([A-Z0-9-]{0,8}[A-Z0-9])?$`)
+
+// referencePattern is what an EDC machine's slip numbers look like, its
+// retrieval reference or its approval code: 4 to 32 capitals, digits and
+// hyphens, a hyphen only between them.
+var referencePattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9-]{2,30}[A-Z0-9]$`)
 
 // CheckOrder validates an order as the device sent it, at the server's
 // moment now: every problem at once as validation_failed, a line's fields
@@ -149,6 +155,9 @@ func CheckOrder(in models.NewOrder, now time.Time) (models.CheckedOrder, error) 
 	}
 	switch in.Payment.Method {
 	case models.PaymentCash:
+		if trimmed(in.Payment.Reference) != nil {
+			fields["payment.reference"] = "not_allowed"
+		}
 		switch r := in.Payment.Received; {
 		case r == nil:
 			fields["payment.received"] = "required"
@@ -159,7 +168,15 @@ func CheckOrder(in models.NewOrder, now time.Time) (models.CheckedOrder, error) 
 		default:
 			c.Received = r
 		}
-	case models.PaymentQRIS, models.PaymentDebit:
+	case models.PaymentDebit:
+		var rule string
+		if c.Reference, rule = checkReference(in.Payment.Reference); rule != "" {
+			fields["payment.reference"] = rule
+		}
+	case models.PaymentQRIS:
+		if trimmed(in.Payment.Reference) != nil {
+			fields["payment.reference"] = "not_allowed"
+		}
 	case "":
 		fields["payment.method"] = "required"
 	default:
@@ -170,6 +187,26 @@ func CheckOrder(in models.NewOrder, now time.Time) (models.CheckedOrder, error) 
 	}
 	return c, nil
 }
+
+// checkReference returns a debit's slip number in capitals, or the rule it
+// breaks. A card's number is refused by its name: it must never reach the
+// server, and a cashier reading the wrong line of a slip could type one in.
+func checkReference(raw *string) (reference, rule string) {
+	typed := trimmed(raw)
+	if typed == nil {
+		return "", "required"
+	}
+	n := strings.ToUpper(*typed)
+	if digits := strings.ReplaceAll(n, "-", ""); len(digits) >= 13 && len(digits) <= 19 && !strings.ContainsFunc(digits, notDigit) {
+		return "", "card_number"
+	}
+	if !referencePattern.MatchString(n) {
+		return "", "format"
+	}
+	return n, ""
+}
+
+func notDigit(r rune) bool { return r < '0' || r > '9' }
 
 // checkOrderLines validates the order's lines into fields, and returns them
 // when they all pass. Together they come to at most MaxSubtotal.

@@ -141,6 +141,15 @@ func TestOrderRules(t *testing.T) {
 		"cash without amount": {func(b map[string]any) { delete(pay(b), "received") }, "payment.received", "required"},
 		"too little cash":     {func(b map[string]any) { pay(b)["received"] = b["total"].(int64) - 1 }, "payment.received", "short"},
 		"too much cash":       {func(b map[string]any) { pay(b)["received"] = models.MaxReceived + 1 }, "payment.received", "range"},
+		"cash with reference": {func(b map[string]any) { pay(b)["reference"] = "123456" }, "payment.reference", "not_allowed"},
+		"qris with reference": {func(b map[string]any) { b["payment"] = debit("123456"); pay(b)["method"] = "qris" }, "payment.reference", "not_allowed"},
+		"debit, no reference": {func(b map[string]any) { b["payment"] = map[string]any{"method": "debit"} }, "payment.reference", "required"},
+		"blank reference":     {func(b map[string]any) { b["payment"] = debit("   ") }, "payment.reference", "required"},
+		"short reference":     {func(b map[string]any) { b["payment"] = debit("123") }, "payment.reference", "format"},
+		"long reference":      {func(b map[string]any) { b["payment"] = debit(strings.Repeat("1", 33)) }, "payment.reference", "format"},
+		"odd reference":       {func(b map[string]any) { b["payment"] = debit("12 34!") }, "payment.reference", "format"},
+		"a card's number":     {func(b map[string]any) { b["payment"] = debit("4111111111111111") }, "payment.reference", "card_number"},
+		"a card's, hyphens":   {func(b map[string]any) { b["payment"] = debit("4111-1111-1111-1111") }, "payment.reference", "card_number"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -174,6 +183,59 @@ func TestOrderRules(t *testing.T) {
 	if n := h.count(`SELECT count(*) FROM orders`); n != 2 {
 		t.Errorf("%d orders, want the 2 that passed", n)
 	}
+}
+
+// TestDebitOrder is the part of the EDC frame the server holds: a debit sale
+// keeps its slip's number. Debit stays off in Payment Control until it is
+// released, so the test turns it on underneath.
+func TestDebitOrder(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	kopi := h.menu("o1", h.drinks, "Kopi", 18000, nil)
+	tl := h.till("o1", "Kasir")
+
+	body := h.order(tl, item(kopi, 1))
+	body["payment"] = debit(" ab-123456 ")
+	h.do(http.MethodPost, ordersPath, "cashier", tl.token, body).status(http.StatusConflict, "payment_method_unavailable")
+
+	h.exec(`UPDATE outlet_payment_methods SET is_enabled = true WHERE outlet_id = 'o1' AND method = 'debit'`)
+	var o models.OrderResponse
+	h.do(http.MethodPost, ordersPath, "cashier", tl.token, body).status(http.StatusCreated, "").decode(&o)
+	if p := o.Payment; p.Method != "debit" || p.Amount != o.Total || p.Received != nil || p.Change != nil ||
+		p.Reference == nil || *p.Reference != "AB-123456" || p.Status != models.OrderPaid {
+		t.Errorf("payment = %+v", p)
+	}
+	var saved string
+	h.scalar(&saved, `SELECT reference FROM payments WHERE order_id = $1`, o.OrderID)
+	if saved != "AB-123456" {
+		t.Errorf("saved reference = %q", saved)
+	}
+	// A resend finds it; a resend with another slip is another sale under the
+	// same ID. A 12-digit retrieval reference is fine.
+	var again models.OrderResponse
+	h.do(http.MethodPost, ordersPath, "cashier", tl.token, body).status(http.StatusOK, "").decode(&again)
+	if again.Payment.Reference == nil || *again.Payment.Reference != "AB-123456" {
+		t.Errorf("resent payment = %+v", again.Payment)
+	}
+	other := h.order(tl, item(kopi, 1))
+	other["order_id"], other["order_no"] = body["order_id"], body["order_no"]
+	other["payment"] = debit("123456789012")
+	h.do(http.MethodPost, ordersPath, "cashier", tl.token, other).status(http.StatusConflict, "order_id_conflict")
+	next := h.order(tl, item(kopi, 1))
+	next["payment"] = debit("123456789012")
+	h.do(http.MethodPost, ordersPath, "cashier", tl.token, next).status(http.StatusCreated, "")
+
+	// Cash has none.
+	var cash models.OrderResponse
+	h.do(http.MethodPost, ordersPath, "cashier", tl.token, h.order(tl, item(kopi, 1))).status(http.StatusCreated, "").decode(&cash)
+	if cash.Payment.Reference != nil {
+		t.Errorf("cash reference = %v", *cash.Payment.Reference)
+	}
+}
+
+// debit is an order's payment by debit, with its slip's number.
+func debit(reference string) map[string]any {
+	return map[string]any{"method": "debit", "reference": reference}
 }
 
 // firstLine is the first line of an order's body.

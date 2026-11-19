@@ -247,7 +247,8 @@ from anywhere else, and a revoked till stops at once.
   - a voucher is checked again and its use taken under its lock, so its
     quota holds however many outlets sell at once;
   - the payment method is on; cash covers the total, and the change is the
-    server's.
+    server's; a debit carries the number on the EDC machine's slip, and a card's
+    number is refused (13 to 19 digits, hyphens aside).
 - **Transactions are kept as made.** Triggers refuse deleting an order, a
   line or a payment, changing a line, and changing an order or payment in
   any way but paid → void (SQLSTATE 42501), whoever holds the database
@@ -410,6 +411,9 @@ after 15 minutes, and a new ticket needs a live session.
   may send: orders made offline, against the stock it last knew.
 - Two-factor authentication (Next Dev in the spec).
 - A breached-password check.
+- Debit: the server keeps a slip's number, but Payment Control keeps the method
+  off (`PaymentMethodReleased`), and no machine is connected. Nothing checks a
+  number against the bank: it is what the cashier or the machine said.
 - A shared rate-limit store, needed before a second API instance.
 - The deployment, live: the server's Nginx with TLS and Caddy in front of the
   API, the Docker image, and `TRUSTED_PROXIES` as above are in `deploy/`,

@@ -24,15 +24,15 @@ SELECT unnest(@order_item_ids::text[]), @outlet_id, @order_id, unnest(@positions
     NULLIF(unnest(@notes::text[]), ''), unnest(@line_totals::bigint[]);
 
 -- name: InsertPayment :exec
-INSERT INTO payments (payment_id, outlet_id, order_id, method, amount, received, change, status)
-VALUES (@payment_id, @outlet_id, @order_id, @method, @amount, @received, @change, 'paid');
+INSERT INTO payments (payment_id, outlet_id, order_id, method, amount, received, change, reference, status)
+VALUES (@payment_id, @outlet_id, @order_id, @method, @amount, @received, @change, @reference, 'paid');
 
 -- name: GetOrder :one
 SELECT o.order_id, o.device_id, o.order_no, o.type, o.table_id, o.table_name, o.stand_number, o.cashier_id,
     o.subtotal, o.voucher_code, o.voucher_discount,
     o.service_bps, o.service, o.tax_bps, o.tax, o.total, o.status, o.client_created_at, o.created_at,
     o.voided_at, o.voided_by, o.void_reason,
-    p.method, p.amount, p.received, p.change, p.status AS payment_status
+    p.method, p.amount, p.received, p.change, p.reference, p.status AS payment_status
 FROM orders o
 JOIN payments p ON p.order_id = o.order_id AND p.outlet_id = o.outlet_id
 WHERE o.order_id = @order_id AND o.outlet_id = @outlet_id;

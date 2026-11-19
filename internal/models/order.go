@@ -103,7 +103,9 @@ type OrderPayment struct {
 	// what they got back.
 	Received *int64
 	Change   *int64
-	Status   string
+	// Reference is debit's: the number on the EDC machine's slip.
+	Reference *string
+	Status    string
 }
 
 // OrderSummary is an order in a list.
@@ -167,10 +169,12 @@ type NewOrderItem struct {
 }
 
 // NewOrderPayment is how a NewOrder is paid. Received is cash's: what the
-// customer handed over.
+// customer handed over. Reference is debit's: the number on the EDC machine's
+// slip.
 type NewOrderPayment struct {
-	Method   string
-	Received *int64
+	Method    string
+	Received  *int64
+	Reference *string
 }
 
 // CheckedOrder is a NewOrder that passed its checks.
@@ -191,6 +195,8 @@ type CheckedOrder struct {
 	Total       int64
 	Method      string
 	Received    *int64
+	// Reference is debit's, in capitals; empty for the other methods.
+	Reference string
 }
 
 // CheckedLine is a line of a CheckedOrder.
@@ -276,11 +282,12 @@ type OrderItemResponse struct {
 
 // OrderPaymentResponse is how an order was paid.
 type OrderPaymentResponse struct {
-	Method   string `json:"method"`
-	Amount   int64  `json:"amount"`
-	Received *int64 `json:"received"`
-	Change   *int64 `json:"change"`
-	Status   string `json:"status"`
+	Method    string  `json:"method"`
+	Amount    int64   `json:"amount"`
+	Received  *int64  `json:"received"`
+	Change    *int64  `json:"change"`
+	Reference *string `json:"reference"`
+	Status    string  `json:"status"`
 }
 
 // OrderResponse is an order as the order endpoints send it.

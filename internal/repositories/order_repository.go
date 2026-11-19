@@ -75,7 +75,8 @@ func (r *OrderRepository) Get(ctx context.Context, outletID, orderID string) (mo
 		VoucherCode: row.VoucherCode,
 		ServiceBPS:  int(row.ServiceBps), TaxBPS: int(row.TaxBps),
 		Payment: models.OrderPayment{
-			Method: row.Method, Amount: row.Amount, Received: row.Received, Change: row.Change, Status: row.PaymentStatus,
+			Method: row.Method, Amount: row.Amount, Received: row.Received, Change: row.Change, Reference: row.Reference,
+			Status: row.PaymentStatus,
 		},
 		ClientCreatedAt: row.ClientCreatedAt, CreatedAt: row.CreatedAt, VoidedAt: row.VoidedAt,
 		VoidReason: row.VoidReason,
@@ -183,7 +184,7 @@ func (r *OrderRepository) Insert(ctx context.Context, o models.OrderRecord) erro
 	}
 	err = q.InsertPayment(ctx, store.InsertPaymentParams{
 		PaymentID: o.PaymentID, OutletID: o.OutletID, OrderID: o.OrderID, Method: o.Payment.Method,
-		Amount: o.Payment.Amount, Received: o.Payment.Received, Change: o.Payment.Change,
+		Amount: o.Payment.Amount, Received: o.Payment.Received, Change: o.Payment.Change, Reference: o.Payment.Reference,
 	})
 	if err != nil {
 		return fmt.Errorf("insert the payment of order %s: %w", o.OrderID, err)

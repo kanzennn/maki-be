@@ -235,6 +235,9 @@ func orderRecord(cashierID, outletID, deviceID string, c models.CheckedOrder, ha
 		change := *c.Received - t.Total
 		rec.Payment.Received, rec.Payment.Change = c.Received, &change
 	}
+	if c.Reference != "" {
+		rec.Payment.Reference = &c.Reference
+	}
 	return rec
 }
 
@@ -266,8 +269,10 @@ func orderHash(c models.CheckedOrder) (string, error) {
 		// Left out without a table, as the voucher is; the stand too.
 		TableID     string `json:"table_id,omitempty"`
 		StandNumber string `json:"stand_number,omitempty"`
+		// Left out without one, so cash's hashes stay as they were.
+		Reference string `json:"reference,omitempty"`
 	}{c.OrderID, c.OrderNo, c.Type, c.CreatedAt, lines, c.VoucherCode, c.Total, c.Method, c.Received, c.TableID,
-		c.StandNumber})
+		c.StandNumber, c.Reference})
 	if err != nil {
 		return "", fmt.Errorf("hash order %s: %w", c.OrderID, err)
 	}

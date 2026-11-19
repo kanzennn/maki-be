@@ -449,7 +449,7 @@ SELECT o.order_id, o.device_id, o.order_no, o.type, o.table_id, o.table_name, o.
     o.subtotal, o.voucher_code, o.voucher_discount,
     o.service_bps, o.service, o.tax_bps, o.tax, o.total, o.status, o.client_created_at, o.created_at,
     o.voided_at, o.voided_by, o.void_reason,
-    p.method, p.amount, p.received, p.change, p.status AS payment_status
+    p.method, p.amount, p.received, p.change, p.reference, p.status AS payment_status
 FROM orders o
 JOIN payments p ON p.order_id = o.order_id AND p.outlet_id = o.outlet_id
 WHERE o.order_id = $1 AND o.outlet_id = $2
@@ -487,6 +487,7 @@ type GetOrderRow struct {
 	Amount          int64
 	Received        *int64
 	Change          *int64
+	Reference       *string
 	PaymentStatus   string
 }
 
@@ -520,6 +521,7 @@ func (q *Queries) GetOrder(ctx context.Context, arg GetOrderParams) (GetOrderRow
 		&i.Amount,
 		&i.Received,
 		&i.Change,
+		&i.Reference,
 		&i.PaymentStatus,
 	)
 	return i, err
@@ -623,8 +625,8 @@ func (q *Queries) InsertOrderItems(ctx context.Context, arg InsertOrderItemsPara
 }
 
 const insertPayment = `-- name: InsertPayment :exec
-INSERT INTO payments (payment_id, outlet_id, order_id, method, amount, received, change, status)
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'paid')
+INSERT INTO payments (payment_id, outlet_id, order_id, method, amount, received, change, reference, status)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'paid')
 `
 
 type InsertPaymentParams struct {
@@ -635,6 +637,7 @@ type InsertPaymentParams struct {
 	Amount    int64
 	Received  *int64
 	Change    *int64
+	Reference *string
 }
 
 func (q *Queries) InsertPayment(ctx context.Context, arg InsertPaymentParams) error {
@@ -646,6 +649,7 @@ func (q *Queries) InsertPayment(ctx context.Context, arg InsertPaymentParams) er
 		arg.Amount,
 		arg.Received,
 		arg.Change,
+		arg.Reference,
 	)
 	return err
 }

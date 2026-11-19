@@ -5290,6 +5290,16 @@ components:
           type: [integer, "null"]
           format: int64
           description: Cash, what the customer handed over, at least the total; the other methods have none.
+        reference:
+          type: [string, "null"]
+          maxLength: 64
+          example: "123456789012"
+          description: >
+            Debit, and only debit: the retrieval reference or approval code on
+            the EDC machine's slip, 4 to 32 letters, digits and hyphens, in
+            any case. Never a card's number, which is refused
+            (`payment.reference`: `card_number`). The field's other rules are
+            `required`, `format` and, on another method, `not_allowed`.
     OrderType:
       type: string
       enum: [dine_in, takeaway]
@@ -5405,7 +5415,7 @@ components:
           format: int64
     OrderPayment:
       type: object
-      required: [method, amount, received, change, status]
+      required: [method, amount, received, change, reference, status]
       properties:
         method:
           $ref: "#/components/schemas/PaymentMethod"
@@ -5418,6 +5428,9 @@ components:
         change:
           type: [integer, "null"]
           format: int64
+        reference:
+          type: [string, "null"]
+          description: Debit, the number on the EDC machine's slip, in capitals; null for the other methods.
         status:
           $ref: "#/components/schemas/OrderStatus"
     OrderSummary:
